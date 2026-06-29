@@ -32,6 +32,15 @@ func NewServer(mediaRoot string, rdb *redis.Client, verifier *auth.Verifier) *Se
 // Playlists (.m3u8) liberadas com token válido; cada segmento (.m4s) passa pelo
 // paywall quando o tier é free.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// CORS: o player (hls.js) roda no domínio do front e busca os segmentos aqui.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization,Range")
+	w.Header().Set("Access-Control-Expose-Headers", "X-Paywall")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if r.URL.Path == "/healthz" {
 		w.WriteHeader(http.StatusOK)
 		return
