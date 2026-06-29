@@ -40,6 +40,8 @@ class HandleInertiaRequests extends Middleware
             'name' => config('app.name'),
             'auth' => [
                 'user' => $request->user(),
+                // tier derivado da assinatura ativa — usado pelo paywall no front.
+                'tier' => $request->user()?->activeSubscription() ? 'paid' : 'free',
             ],
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];

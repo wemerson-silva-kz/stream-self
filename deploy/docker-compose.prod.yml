@@ -1,0 +1,122 @@
+# Stack de PRODUÇÃO (self-host). Suba com:
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+#
+# Diferenças vs o compose de dev: app Laravel containerizado, restart automático,
+# sem portas de banco/redis expostas ao host, edge é o único ponto público de vídeo.
+name: streamself-prod
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-streamself}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?defina DB_PASSWORD}
+      POSTGRES_DB: ${DB_DATABASE:-streamself}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-streamself}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redisdata:/data"]
+
+  # ---- App Laravel (control plane) ----
+  web:
+    <<: *restart
+    build: { context: ../apps/web, dockerfile: Dockerfile }
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: ${APP_URL:?defina APP_URL}
+      APP_KEY: ${APP_KEY:?defina APP_KEY}
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_DATABASE: ${DB_DATABASE:-streamself}
+      DB_USERNAME: ${DB_USERNAME:-streamself}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_CLIENT: predis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PREFIX: ""
+      SESSION_DRIVER: database
+      STREAM_JWT_SECRET: ${STREAM_JWT_SECRET:?defina STREAM_JWT_SECRET}
+      STREAM_GLOBAL_FREEMIUM_SECONDS: ${STREAM_GLOBAL_FREEMIUM_SECONDS:-1800}
+      STREAM_ORIGIN_URL: ${STREAM_ORIGIN_URL:?ex https://cdn.seudominio.com}
+      STREAM_CHAT_WS_URL: ${STREAM_CHAT_WS_URL:?ex wss://chat.seudominio.com/ws}
+      STREAM_RTMP_URL: ${STREAM_RTMP_URL:-rtmp://ingest.seudominio.com/live}
+      STREAM_SRT_URL: ${STREAM_SRT_URL:-srt://ingest.seudominio.com:9000}
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?defina INTERNAL_SECRET}
+      BILLING_DRIVER: ${BILLING_DRIVER:-stub}
+    ports: ["${WEB_PORT:-8080}:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  # ---- Plano de dados Go ----
+  chat:
+    <<: *restart
+    build: { context: ../services, dockerfile: Dockerfile, args: { SVC: chat } }
+    environment:
+      CHAT_ADDR: ":8082"
+      REDIS_ADDR: "redis:6379"
+      STREAM_JWT_SECRET: ${STREAM_JWT_SECRET}
+    ports: ["${CHAT_PORT:-8082}:8082"] # exponha atrás de TLS (wss) via proxy
+    depends_on: [redis]
+
+  origin:
+    <<: *restart
+    build: { context: ../services, dockerfile: Dockerfile, args: { SVC: origin } }
+    environment:
+      ORIGIN_ADDR: ":8081"
+      REDIS_ADDR: "redis:6379"
+      STREAM_JWT_SECRET: ${STREAM_JWT_SECRET}
+      MEDIA_ROOT: "/srv/media"
+    volumes: ["media:/srv/media"]
+    depends_on: [redis]
+
+  persist:
+    <<: *restart
+    build: { context: ../services, dockerfile: Dockerfile, args: { SVC: persist } }
+    environment:
+      REDIS_ADDR: "redis:6379"
+      DATABASE_URL: "postgres://${DB_USERNAME:-streamself}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-streamself}"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  ingest:
+    <<: *restart
+    build: { context: ../services, dockerfile: Dockerfile.ingest }
+    environment:
+      MEDIA_ROOT: "/srv/media"
+      FFMPEG_ENCODER: ${FFMPEG_ENCODER:-libx264} # h264_nvenc com GPU
+      LARAVEL_INTERNAL_URL: "http://web:8080/internal"
+      INTERNAL_SECRET: ${INTERNAL_SECRET}
+      INGEST_INPUT: "srt://0.0.0.0:9000?mode=listener"
+    ports: ["${SRT_PORT:-9000}:9000/udp"]
+    volumes: ["media:/srv/media"]
+    depends_on: [web]
+
+  # ---- Edge: cache dos segmentos LL-HLS (ponto público de vídeo) ----
+  edge:
+    <<: *restart
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/edge.conf:/etc/nginx/conf.d/default.conf:ro
+    ports: ["${EDGE_PORT:-8085}:80"]
+    depends_on: [origin]
+
+volumes:
+  pgdata:
+  redisdata:
+  media:

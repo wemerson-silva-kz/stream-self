@@ -21,4 +21,8 @@ return [
 
     // Base URL (ws) do serviço de chat Go.
     'chat_ws_url' => env('STREAM_CHAT_WS_URL', 'ws://localhost:8082/ws'),
+
+    // Endereços de ingest mostrados ao streamer (OBS).
+    'rtmp_url' => env('STREAM_RTMP_URL', 'rtmp://localhost/live'),
+    'srt_url' => env('STREAM_SRT_URL', 'srt://localhost:9000'),
 ];

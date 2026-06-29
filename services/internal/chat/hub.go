@@ -28,8 +28,9 @@ type UserRef struct {
 
 // client é uma conexão WS local a este nó.
 type client struct {
-	sub  string // identidade do viewer (user:123 / anon:...)
-	send chan []byte
+	sub    string // identidade do viewer (user:123 / anon:...)
+	send   chan []byte
+	cancel context.CancelFunc // encerra a conexão (ban ao vivo)
 }
 
 // Hub agrega clientes por live e cuida do fan-out local + Redis.
@@ -93,7 +94,8 @@ func (h *Hub) fanoutLocal(liveID int64, payload []byte) {
 }
 
 // runRedis assina o canal da live e replica para os clientes locais.
-// Roda uma vez por live ativa neste nó.
+// Roda uma vez por live ativa neste nó. Eventos de moderação ("ban") também
+// derrubam a conexão local do alvo.
 func (h *Hub) runRedis(ctx context.Context, liveID int64) {
 	pubsub := h.rdb.Subscribe(ctx, channel(liveID))
 	defer pubsub.Close()
@@ -106,9 +108,32 @@ func (h *Hub) runRedis(ctx context.Context, liveID int64) {
 			if !ok {
 				return
 			}
-			h.fanoutLocal(liveID, []byte(msg.Payload))
+			payload := []byte(msg.Payload)
+			h.maybeEnforce(liveID, payload)
+			h.fanoutLocal(liveID, payload)
 		}
 	}
+}
+
+// maybeEnforce inspeciona eventos de moderação e aplica efeitos locais.
+// ban -> derruba as conexões do sub alvo neste nó.
+func (h *Hub) maybeEnforce(liveID int64, payload []byte) {
+	var evt struct {
+		Type string `json:"t"`
+		Meta struct {
+			Target string `json:"target"`
+		} `json:"meta"`
+	}
+	if json.Unmarshal(payload, &evt) != nil || evt.Type != "ban" || evt.Meta.Target == "" {
+		return
+	}
+	h.mu.RLock()
+	for c := range h.rooms[liveID] {
+		if c.sub == evt.Meta.Target && c.cancel != nil {
+			c.cancel()
+		}
+	}
+	h.mu.RUnlock()
 }
 
 // Publish envia uma mensagem para TODOS os nós (via Redis).

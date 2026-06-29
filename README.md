@@ -85,10 +85,19 @@ docker compose up --build   # postgres, redis, chat, origin, persist, ingest, ed
 ✅ Serviços Go: chat (WS+pubsub+ratelimit), origin (paywall), ingest (FFmpeg ABR), persist
 ✅ docker-compose + nginx edge
 
+### Entregue e validado
+- [x] Front completo (7 telas) fiel ao design, ligado à API real (token JWT, hls.js, chat WS)
+- [x] Player LL-HLS com paywall server-side (403 + `X-Paywall`) — validado ponta a ponta
+- [x] Chat em tempo real (WebSocket + Redis Pub/Sub) — fan-out validado
+- [x] Auth (Fortify) + billing agnóstico de gateway (stub/stripe/mercadopago/asaas)
+- [x] CRUD de lives + painel do streamer (stream key real, rotação, go live/offline)
+- [x] Métricas reais (viewers/msgs no Redis) + moderação real (mod_delete/ban ao vivo)
+- [x] VODs/Episódios reais (gerados ao encerrar a live)
+- [x] 57 testes PHPUnit passando · deploy de produção: ver [DEPLOY.md](DEPLOY.md)
+
 ### Próximos passos sugeridos
-- [ ] Player React (hls.js) + UI de chat + modal de paywall (Inertia pages)
 - [ ] Packager LL-HLS real em Go (partial segments `EXT-X-PART`) no origin
 - [ ] Servidor RTMP (`yutopp/go-rtmp`) no ingest além do SRT
-- [ ] Webhooks de billing → ativa subscription → publica `tier_upgrade` no Redis
-- [ ] Painel admin (criar live, rotacionar stream_key, moderar chat)
-- [ ] Trocar dev p/ Postgres + RS256 (Laravel assina, Go só valida c/ pública)
+- [ ] Gravação de VOD de verdade (cópia do LL-HLS pós-live) + playback dedicado
+- [ ] RS256 (Laravel assina, Go só valida com a pública)
+- [ ] Implementar os drivers reais de billing (preencher `createCheckout`/`parseWebhook`)

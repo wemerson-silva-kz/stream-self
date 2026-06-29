@@ -1,11 +1,26 @@
-import { Head, usePage } from '@inertiajs/react';
+import { Head, router, usePage } from '@inertiajs/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { css } from '@/lib/css';
 import { useLiveSession } from '@/hooks/use-live-session';
 
+type MyLive = {
+    id: number;
+    title: string;
+    slug: string;
+    status: string;
+    visibility: string;
+    freemium_seconds: number | null;
+    is_featured: boolean;
+    stream_key: string | null;
+    rtmp_url: string;
+    srt_url: string;
+};
 type PageProps = {
     live: { id: number; slug: string; title: string; status: string } | null;
-    endpoints: { token: string | null };
+    endpoints: { token: string | null; metrics: string | null };
+    auth: { user: { name: string } | null; tier: 'free' | 'paid' };
+    myLive: MyLive | null;
+    episodes: Array<{ id: number; title: string; date: string; dur: string; views: string; cat: string; subscribers_only: boolean }> | null;
 };
 
 // ============================================================================
@@ -95,12 +110,19 @@ const clipDur = (a: number, b: number) => {
 };
 
 export default function Show() {
-    const { endpoints } = usePage<PageProps>().props;
+    const { endpoints, auth, myLive, episodes } = usePage<PageProps>().props;
+    // episódios reais (VODs) quando houver; senão o preview de demonstração
+    const episodeList = episodes ?? EPISODES.map((e, i) => ({ ...e, id: i, subscribers_only: false }));
+    const [newLiveTitle, setNewLiveTitle] = useState('');
+    const [metrics, setMetrics] = useState<{ viewers: number; msgs_per_min: number; live_data: boolean } | null>(null);
     const chatRef = useRef<HTMLDivElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
 
     const [view, setView] = useState<View>('home');
-    const [tier, setTier] = useState<'free' | 'paid'>('free');
+    const [tier, setTier] = useState<'free' | 'paid'>(auth.tier);
+    // formulário de auth (modal)
+    const [authForm, setAuthForm] = useState({ name: '', email: '', password: '', password_confirmation: '' });
+    const [authBusy, setAuthBusy] = useState(false);
     const [paywallOpen, setPaywallOpen] = useState(false);
     const [freeRemaining, setFreeRemaining] = useState(42);
     const [playing, setPlaying] = useState(false);
@@ -123,7 +145,6 @@ export default function Show() {
         { id: 3, title: 'clutch 1v3 no torneio', dur: '0:58', views: '21k', when: 'ontem' },
     ]);
     const [keyRevealed, setKeyRevealed] = useState(false);
-    const [streamKey, setStreamKey] = useState('live_sk_8f3a9c2e7b14d05f');
     const [copied, setCopied] = useState<Record<string, boolean>>({});
     const [toast, setToast] = useState('');
     const [modMessages, setModMessages] = useState<ModMsg[]>([
@@ -142,6 +163,11 @@ export default function Show() {
     ]);
 
     const isPaid = tier === 'paid';
+
+    // mantém o tier alinhado ao servidor (após login/assinatura recarregar props)
+    useEffect(() => {
+        setTier(auth.tier);
+    }, [auth.tier]);
 
     // ---- sessão real (token JWT + chat WS + hls.js), com fallback simulado ----
     const { session, tokenError, chatLive, liveMessages, sendLive, attachPlayer } = useLiveSession(endpoints.token, view === 'live');
@@ -167,6 +193,33 @@ export default function Show() {
 
     // mensagens exibidas: reais (WS) quando conectado, senão as simuladas -------
     const shownMessages = chatLive ? liveMessages : messages;
+
+    // polling de métricas reais (viewers/msgs) quando no painel de streamer/mod
+    useEffect(() => {
+        if ((view !== 'dashboard' && view !== 'admin') || !endpoints.metrics) return;
+        const url = endpoints.metrics;
+        let alive = true;
+        const tick = () => {
+            fetch(url, { headers: { Accept: 'application/json' } })
+                .then((r) => (r.ok ? r.json() : null))
+                .then((m) => { if (alive && m) setMetrics(m); })
+                .catch(() => {});
+        };
+        tick();
+        const t = setInterval(tick, 5000);
+        return () => { alive = false; clearInterval(t); };
+    }, [view, endpoints.metrics]);
+
+    // valores reais quando há sinal do plano Go, senão o preview do design
+    const fmt = (n: number) => n.toLocaleString('pt-BR');
+    const viewersLabel = metrics?.live_data ? fmt(metrics.viewers) : '14.207';
+    const msgsLabel = metrics?.live_data ? fmt(metrics.msgs_per_min) : '312';
+
+    // moderação real (publica no Redis via backend); só o dono da live.
+    const modPost = (path: string, data: Record<string, string | number | boolean> = {}) => {
+        if (!myLive) return;
+        router.post(`/streamer/lives/${myLive.id}/moderation/${path}`, data, { preserveScroll: true, preserveState: true });
+    };
 
     // contagem regressiva da prévia grátis -> paywall --------------------------
     useEffect(() => {
@@ -228,21 +281,25 @@ export default function Show() {
         const m = modMessages.find((x) => x.id === id);
         setModMessages((ms) => ms.map((x) => (x.id === id ? { ...x, deleted: true } : x)));
         logFn('Mensagem apagada', m?.user ?? '');
+        modPost('delete', { message_id: id });
     };
     const ban = (user: string) => {
         setModMessages((ms) => ms.map((x) => (x.user === user ? { ...x, deleted: true } : x)));
         setBanned((b) => [{ user, reason: 'banido pelo moderador', when: 'agora' }, ...b]);
         logFn('Usuário banido', user);
+        modPost('ban', { target: `user:${user}`, reason: 'banido pelo moderador' });
     };
     const timeout = (user: string) => {
         setModMessages((ms) => ms.map((x) => (x.user === user ? { ...x, deleted: true } : x)));
         logFn('Timeout 10min', user);
+        modPost('ban', { target: `user:${user}`, reason: 'timeout 10min' });
     };
     const toggleMode = (k: keyof typeof modes) => {
         const v = !modes[k];
         const n = { slow: 'Modo lento', subs: 'Só inscritos', followers: 'Só seguidores', emotes: 'Só emotes' };
         setModes((m) => ({ ...m, [k]: v }));
         logFn(n[k] + (v ? ' ativado' : ' desativado'), 'chat');
+        modPost('mode', { mode: k, on: v });
     };
     const createClip = () => {
         const d = clipDur(clipStart, clipEnd);
@@ -250,11 +307,68 @@ export default function Show() {
         setClipTitle('');
         flashToast('Corte criado ✓');
     };
+    // assina o plano (backend). Exige login; com driver stub ativa na hora.
     const completePayment = () => {
-        setTier('paid');
-        setPaywallOpen(false);
-        setView('live');
-        flashToast('Assinatura ativa — acesso liberado ✓', 2800);
+        if (!auth.user) {
+            setView('checkout');
+            setAuthOpen(true);
+            setAuthMode('register');
+            flashToast('Crie sua conta para assinar');
+            return;
+        }
+        router.post(
+            '/billing/subscribe',
+            { method: payTab },
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setPaywallOpen(false);
+                    setView('live');
+                    flashToast('Assinatura ativa — acesso liberado ✓', 2800);
+                },
+                onError: () => flashToast('Não foi possível concluir o pagamento'),
+            },
+        );
+    };
+
+    const doAuth = () => {
+        const url = authMode === 'login' ? '/login' : '/register';
+        const data = authMode === 'login' ? { email: authForm.email, password: authForm.password } : authForm;
+        setAuthBusy(true);
+        router.post(url, data, {
+            onFinish: () => setAuthBusy(false),
+            onSuccess: () => {
+                setAuthOpen(false);
+                flashToast(authMode === 'login' ? 'Bem-vindo de volta ✓' : 'Conta criada ✓');
+            },
+            onError: (errs) => flashToast(Object.values(errs)[0] ?? 'Verifique os dados'),
+        });
+    };
+
+    const doLogout = () => router.post('/logout');
+
+    // ---- painel do streamer (CRUD real) ----
+    const createLive = () => {
+        if (!newLiveTitle.trim()) return;
+        router.post('/streamer/lives', { title: newLiveTitle.trim() }, {
+            preserveScroll: true,
+            onSuccess: () => { setNewLiveTitle(''); flashToast('Live criada ✓'); },
+        });
+    };
+    const rotateRealKey = () => {
+        if (!myLive) return;
+        router.post(`/streamer/lives/${myLive.id}/rotate-key`, {}, {
+            preserveScroll: true,
+            onSuccess: () => flashToast('Chave rotacionada ✓'),
+        });
+    };
+    const toggleLiveStatus = () => {
+        if (!myLive) return;
+        const next = myLive.status === 'live' ? 'offline' : 'live';
+        router.patch(`/streamer/lives/${myLive.id}`, { status: next }, {
+            preserveScroll: true,
+            onSuccess: () => flashToast(next === 'live' ? 'No ar ✓' : 'Transmissão encerrada'),
+        });
     };
 
     const sec = freeRemaining % 60;
@@ -307,9 +421,19 @@ export default function Show() {
                 {isPaid && (
                     <span style={css('display:flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:8px;background:#16261c;border:1px solid #1f5135;color:#34d399;font-size:12px;font-weight:700;letter-spacing:.5px')}>★ PREMIUM</span>
                 )}
-                <Btn s="height:38px;padding:0 18px;border-radius:10px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:700;font-size:14px;font-family:Archivo,sans-serif" onClick={go('checkout')}>Assinar</Btn>
-                <Btn s="height:38px;padding:0 15px;border-radius:10px;border:1px solid #2a2a34;cursor:pointer;background:#15151c;color:#fff;font-weight:700;font-size:14px;font-family:Archivo,sans-serif" onClick={() => { setAuthOpen(true); setAuthMode('login'); }}>Entrar</Btn>
-                <div onClick={() => { setAuthOpen(true); setAuthMode('login'); }} style={css('width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;cursor:pointer')}>B</div>
+                {!isPaid && <Btn s="height:38px;padding:0 18px;border-radius:10px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:700;font-size:14px;font-family:Archivo,sans-serif" onClick={go('checkout')}>Assinar</Btn>}
+                {auth.user ? (
+                    <>
+                        <span style={css('color:#c5c5cf;font-size:13px;font-weight:600')}>{auth.user.name}</span>
+                        <Btn s="height:38px;padding:0 15px;border-radius:10px;border:1px solid #2a2a34;cursor:pointer;background:#15151c;color:#fff;font-weight:700;font-size:14px;font-family:Archivo,sans-serif" onClick={doLogout}>Sair</Btn>
+                        <div style={css('width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px')}>{auth.user.name[0]?.toUpperCase()}</div>
+                    </>
+                ) : (
+                    <>
+                        <Btn s="height:38px;padding:0 15px;border-radius:10px;border:1px solid #2a2a34;cursor:pointer;background:#15151c;color:#fff;font-weight:700;font-size:14px;font-family:Archivo,sans-serif" onClick={() => { setAuthOpen(true); setAuthMode('login'); }}>Entrar</Btn>
+                        <div onClick={() => { setAuthOpen(true); setAuthMode('login'); }} style={css('width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;cursor:pointer')}>?</div>
+                    </>
+                )}
             </div>
 
             <main>
@@ -515,8 +639,8 @@ export default function Show() {
                             <p style={css('margin:7px 0 0;color:#8a8a96;font-size:15px')}>Reveja transmissões anteriores quando quiser. VODs disponíveis para assinantes.</p>
                         </div>
                         <div style={css('display:grid;grid-template-columns:repeat(3,1fr);gap:22px')}>
-                            {EPISODES.map((e, i) => (
-                                <div key={i} onClick={go('live')} style={css('cursor:pointer;border-radius:14px;overflow:hidden;background:#121218;border:1px solid #1f1f27')}>
+                            {episodeList.map((e) => (
+                                <div key={e.id} onClick={go('live')} style={css('cursor:pointer;border-radius:14px;overflow:hidden;background:#121218;border:1px solid #1f1f27')}>
                                     <div style={css('position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#241a44,#120d22);overflow:hidden')}>
                                         <div style={css('position:absolute;inset:0;background:repeating-linear-gradient(125deg,rgba(139,92,246,.14) 0 13px,transparent 13px 28px)')} />
                                         <div style={css('position:absolute;inset:0;display:flex;align-items:center;justify-content:center')}>
@@ -525,6 +649,7 @@ export default function Show() {
                                             </div>
                                         </div>
                                         <div style={css('position:absolute;top:10px;left:10px;height:22px;padding:0 9px;border-radius:6px;background:rgba(0,0,0,.6);display:flex;align-items:center;color:#c084fc;font-size:11px;font-weight:800;letter-spacing:.5px')}>VOD</div>
+                                        {e.subscribers_only && <div style={css('position:absolute;top:10px;right:10px;height:22px;padding:0 9px;border-radius:6px;background:rgba(139,92,246,.92);display:flex;align-items:center;color:#fff;font-size:11px;font-weight:800')}>★ SUB</div>}
                                         <div style={css("position:absolute;bottom:10px;right:10px;height:22px;padding:0 9px;border-radius:6px;background:rgba(0,0,0,.7);display:flex;align-items:center;color:#fff;font-size:11.5px;font-weight:600;font-family:'JetBrains Mono',monospace")}>{e.dur}</div>
                                     </div>
                                     <div style={css('padding:14px')}>
@@ -659,9 +784,9 @@ export default function Show() {
                         </div>
 
                         <div style={css('display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px')}>
-                            <Stat label="VIEWERS AGORA" value="14.207" sub="▲ 6,2% na última hora" subColor="#22c55e" />
+                            <Stat label="VIEWERS AGORA" value={viewersLabel} sub={metrics?.live_data ? 'tempo real · Redis' : '▲ 6,2% na última hora'} subColor="#22c55e" />
                             <Stat label="PICO DE HOJE" value="18.940" sub="às 21h12" />
-                            <Stat label="MSGS / MIN" value="312" sub="chat aquecido 🔥" />
+                            <Stat label="MSGS / MIN" value={msgsLabel} sub={metrics?.live_data ? 'tempo real · Redis' : 'chat aquecido 🔥'} />
                             <Stat label="SAÚDE DO STREAM" value="Ótima" valueColor="#22c55e" sub="5000kbps · 0 drops" mono />
                         </div>
 
@@ -694,37 +819,57 @@ export default function Show() {
                             </div>
                         </div>
 
-                        <div style={css('display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:22px;align-items:start')}>
-                            <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:22px')}>
-                                <div style={css("display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;font-family:'Space Grotesk',sans-serif;margin-bottom:6px")}>🔑 Stream key</div>
-                                <div style={css('color:#7a7a86;font-size:13px;margin-bottom:14px')}>Cole no OBS em Configurações → Transmissão. Nunca compartilhe.</div>
-                                <div style={css('display:flex;gap:9px;align-items:center')}>
-                                    <div style={css("flex:1;height:46px;display:flex;align-items:center;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;font-family:'JetBrains Mono',monospace;font-size:14px;color:#c5c5cf;overflow:hidden;white-space:nowrap;text-overflow:ellipsis")}>{keyRevealed ? streamKey : '••••••••••••••••••••'}</div>
-                                    <Btn s="width:46px;height:46px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#9a9aa6;font-size:17px;cursor:pointer" onClick={() => setKeyRevealed((k) => !k)}>👁</Btn>
-                                    <Btn s="height:46px;padding:0 16px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-weight:700;font-size:14px;cursor:pointer;font-family:Archivo,sans-serif" onClick={() => copy(streamKey, 'key')}>{copied.key ? <span style={css('color:#34d399')}>✓</span> : <span>⧉ Copiar</span>}</Btn>
-                                </div>
-                                <Btn s="margin-top:12px;height:38px;padding:0 14px;border-radius:9px;border:1px solid #3a2a14;background:#1a1510;color:#f59e0b;font-weight:600;font-size:13px;cursor:pointer;font-family:Archivo,sans-serif" onClick={() => { setStreamKey('live_sk_' + Math.random().toString(16).slice(2, 18)); flashToast('Chave rotacionada ✓'); }}>↻ Rotacionar chave (revoga a anterior)</Btn>
+                        {!auth.user ? (
+                            <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:28px;text-align:center;margin-top:22px')}>
+                                <div style={css("font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:18px;margin-bottom:6px")}>Entre para gerenciar sua transmissão</div>
+                                <div style={css('color:#9a9aa6;font-size:14px;margin-bottom:16px')}>Stream key, ingest e status da live ficam disponíveis após login.</div>
+                                <Btn s="height:46px;padding:0 24px;border-radius:11px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:800;font-size:15px;font-family:Archivo,sans-serif" onClick={() => { setAuthOpen(true); setAuthMode('login'); }}>Entrar</Btn>
                             </div>
-                            <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:22px')}>
-                                <div style={css("display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;font-family:'Space Grotesk',sans-serif;margin-bottom:14px")}>📡 Ingest</div>
-                                <Field label="SERVIDOR RTMP">
-                                    <div style={css('display:flex;gap:9px')}>
-                                        <div style={css("flex:1;height:44px;display:flex;align-items:center;padding:0 13px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#c5c5cf;overflow:hidden;white-space:nowrap;text-overflow:ellipsis")}>rtmp://ingest.brunoaiubshow.tv/live</div>
-                                        <Btn s="width:46px;height:44px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#9a9aa6;font-size:15px;cursor:pointer" onClick={() => copy('rtmp://ingest.brunoaiubshow.tv/live', 'rtmp')}>{copied.rtmp ? <span style={css('color:#34d399')}>✓</span> : '⧉'}</Btn>
-                                    </div>
-                                </Field>
-                                <Field label="SERVIDOR SRT (baixa latência)">
-                                    <div style={css('display:flex;gap:9px')}>
-                                        <div style={css("flex:1;height:44px;display:flex;align-items:center;padding:0 13px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#c5c5cf;overflow:hidden;white-space:nowrap;text-overflow:ellipsis")}>srt://ingest.brunoaiubshow.tv:9000</div>
-                                        <Btn s="width:46px;height:44px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#9a9aa6;font-size:15px;cursor:pointer" onClick={() => copy('srt://ingest.brunoaiubshow.tv:9000', 'srt')}>{copied.srt ? <span style={css('color:#34d399')}>✓</span> : '⧉'}</Btn>
-                                    </div>
-                                </Field>
-                                <div style={css('margin-top:14px;display:flex;gap:8px;flex-wrap:wrap')}>
-                                    <span style={css("height:26px;padding:0 10px;border-radius:7px;background:#15151c;border:1px solid #23232c;color:#9a9aa6;font-size:12px;display:flex;align-items:center;font-family:'JetBrains Mono',monospace")}>ABR · 1080/720/480</span>
-                                    <span style={css("height:26px;padding:0 10px;border-radius:7px;background:#15151c;border:1px solid #23232c;color:#9a9aa6;font-size:12px;display:flex;align-items:center;font-family:'JetBrains Mono',monospace")}>LL-HLS · 2s</span>
+                        ) : !myLive ? (
+                            <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:28px;margin-top:22px;max-width:560px')}>
+                                <div style={css("font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:18px;margin-bottom:6px")}>Crie sua primeira live</div>
+                                <div style={css('color:#9a9aa6;font-size:14px;margin-bottom:16px')}>Gera a stream key e os endereços de ingest automaticamente.</div>
+                                <div style={css('display:flex;gap:9px')}>
+                                    <input value={newLiveTitle} onChange={(e) => setNewLiveTitle(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') createLive(); }} placeholder="Título da live (ex: Ranked rumo ao Challenger)" style={css('flex:1;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none')} />
+                                    <Btn s="height:46px;padding:0 22px;border-radius:10px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:800;font-size:15px;font-family:Archivo,sans-serif" onClick={createLive}>Criar live</Btn>
                                 </div>
                             </div>
-                        </div>
+                        ) : (
+                            <div style={css('display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:22px;align-items:start')}>
+                                <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:22px')}>
+                                    <div style={css('display:flex;align-items:center;justify-content:space-between;margin-bottom:6px')}>
+                                        <span style={css("display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;font-family:'Space Grotesk',sans-serif")}>🔑 Stream key</span>
+                                        <Btn s={`height:30px;padding:0 12px;border-radius:8px;border:1px solid ${myLive.status === 'live' ? '#5c1f2c' : '#1f5135'};background:${myLive.status === 'live' ? '#2a0f17' : '#16261c'};color:${myLive.status === 'live' ? '#ff6b85' : '#34d399'};font-weight:700;font-size:12px;cursor:pointer;font-family:Archivo,sans-serif`} onClick={toggleLiveStatus}>{myLive.status === 'live' ? '■ Encerrar' : '● Ficar ao vivo'}</Btn>
+                                    </div>
+                                    <div style={css('color:#7a7a86;font-size:13px;margin-bottom:14px')}>Cole no OBS em Configurações → Transmissão. Nunca compartilhe.</div>
+                                    <div style={css('display:flex;gap:9px;align-items:center')}>
+                                        <div style={css("flex:1;height:46px;display:flex;align-items:center;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;font-family:'JetBrains Mono',monospace;font-size:14px;color:#c5c5cf;overflow:hidden;white-space:nowrap;text-overflow:ellipsis")}>{keyRevealed ? (myLive.stream_key ?? '—') : '••••••••••••••••••••'}</div>
+                                        <Btn s="width:46px;height:46px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#9a9aa6;font-size:17px;cursor:pointer" onClick={() => setKeyRevealed((k) => !k)}>👁</Btn>
+                                        <Btn s="height:46px;padding:0 16px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-weight:700;font-size:14px;cursor:pointer;font-family:Archivo,sans-serif" onClick={() => copy(myLive.stream_key ?? '', 'key')}>{copied.key ? <span style={css('color:#34d399')}>✓</span> : <span>⧉ Copiar</span>}</Btn>
+                                    </div>
+                                    <Btn s="margin-top:12px;height:38px;padding:0 14px;border-radius:9px;border:1px solid #3a2a14;background:#1a1510;color:#f59e0b;font-weight:600;font-size:13px;cursor:pointer;font-family:Archivo,sans-serif" onClick={rotateRealKey}>↻ Rotacionar chave (revoga a anterior)</Btn>
+                                </div>
+                                <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:22px')}>
+                                    <div style={css("display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;font-family:'Space Grotesk',sans-serif;margin-bottom:14px")}>📡 Ingest</div>
+                                    <Field label="SERVIDOR RTMP">
+                                        <div style={css('display:flex;gap:9px')}>
+                                            <div style={css("flex:1;height:44px;display:flex;align-items:center;padding:0 13px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#c5c5cf;overflow:hidden;white-space:nowrap;text-overflow:ellipsis")}>{myLive.rtmp_url}</div>
+                                            <Btn s="width:46px;height:44px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#9a9aa6;font-size:15px;cursor:pointer" onClick={() => copy(myLive.rtmp_url, 'rtmp')}>{copied.rtmp ? <span style={css('color:#34d399')}>✓</span> : '⧉'}</Btn>
+                                        </div>
+                                    </Field>
+                                    <Field label="SERVIDOR SRT (baixa latência)">
+                                        <div style={css('display:flex;gap:9px')}>
+                                            <div style={css("flex:1;height:44px;display:flex;align-items:center;padding:0 13px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#c5c5cf;overflow:hidden;white-space:nowrap;text-overflow:ellipsis")}>{myLive.srt_url}?streamid={keyRevealed ? (myLive.stream_key ?? '') : '•••'}</div>
+                                            <Btn s="width:46px;height:44px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#9a9aa6;font-size:15px;cursor:pointer" onClick={() => copy(`${myLive.srt_url}?streamid=${myLive.stream_key ?? ''}`, 'srt')}>{copied.srt ? <span style={css('color:#34d399')}>✓</span> : '⧉'}</Btn>
+                                        </div>
+                                    </Field>
+                                    <div style={css('margin-top:14px;display:flex;gap:8px;flex-wrap:wrap')}>
+                                        <span style={css("height:26px;padding:0 10px;border-radius:7px;background:#15151c;border:1px solid #23232c;color:#9a9aa6;font-size:12px;display:flex;align-items:center;font-family:'JetBrains Mono',monospace")}>ABR · 1080/720/480</span>
+                                        <span style={css("height:26px;padding:0 10px;border-radius:7px;background:#15151c;border:1px solid #23232c;color:#9a9aa6;font-size:12px;display:flex;align-items:center;font-family:'JetBrains Mono',monospace")}>LL-HLS · 2s</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -737,12 +882,12 @@ export default function Show() {
                                 <h1 style={css("margin:0;font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:700;letter-spacing:-.5px")}>Painel de moderação · brunoaiubshow</h1>
                             </div>
                             <span style={css('display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border-radius:10px;background:#2a0f17;border:1px solid #5c1f2c;color:#ff6b85;font-size:13px;font-weight:700')}>
-                                <span style={css('width:8px;height:8px;border-radius:50%;background:#ff3b5c;animation:pulse 1.4s infinite')} />chat ao vivo · 14.207
+                                <span style={css('width:8px;height:8px;border-radius:50%;background:#ff3b5c;animation:pulse 1.4s infinite')} />chat ao vivo · {viewersLabel}
                             </span>
                         </div>
 
                         <div style={css('display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:18px')}>
-                            <Stat label="MENSAGENS / MIN" value="312" />
+                            <Stat label="MENSAGENS / MIN" value={msgsLabel} />
                             <Stat label="CHATTERS ÚNICOS" value="8.420" />
                             <Stat label="AÇÕES HOJE" value={String(modLog.length + 47)} />
                             <Stat label="MODS ONLINE" value="3" valueColor="#22c55e" />
@@ -755,7 +900,7 @@ export default function Show() {
                                 <Btn s={modeStyle(modes.subs)} onClick={() => toggleMode('subs')}>★ Só inscritos</Btn>
                                 <Btn s={modeStyle(modes.followers)} onClick={() => toggleMode('followers')}>♥ Só seguidores</Btn>
                                 <Btn s={modeStyle(modes.emotes)} onClick={() => toggleMode('emotes')}>😀 Só emotes</Btn>
-                                <Btn s="flex:1;min-width:128px;height:46px;border-radius:11px;cursor:pointer;font:600 13.5px Archivo,sans-serif;border:1px solid #5c1f2c;background:#2a0f17;color:#ff6b85" onClick={() => { setModMessages((ms) => ms.map((x) => ({ ...x, deleted: true }))); flashToast('Chat limpo ✓'); }}>🧹 Limpar chat</Btn>
+                                <Btn s="flex:1;min-width:128px;height:46px;border-radius:11px;cursor:pointer;font:600 13.5px Archivo,sans-serif;border:1px solid #5c1f2c;background:#2a0f17;color:#ff6b85" onClick={() => { setModMessages((ms) => ms.map((x) => ({ ...x, deleted: true }))); flashToast('Chat limpo ✓'); modPost('clear'); }}>🧹 Limpar chat</Btn>
                             </div>
                         </div>
 
@@ -945,10 +1090,11 @@ export default function Show() {
                             <div style={css('display:flex;align-items:center;gap:12px;margin:18px 0')}>
                                 <div style={css('flex:1;height:1px;background:#23232c')} /><span style={css('color:#6a6a76;font-size:12px')}>ou</span><div style={css('flex:1;height:1px;background:#23232c')} />
                             </div>
-                            {authMode === 'register' && <input placeholder="Nome de usuário" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none;margin-bottom:11px')} />}
-                            <input placeholder="E-mail" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none;margin-bottom:11px')} />
-                            <input type="password" placeholder="Senha" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none;margin-bottom:16px')} />
-                            <Btn s="width:100%;height:50px;border-radius:12px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:800;font-size:15px;font-family:Archivo,sans-serif" onClick={() => { setAuthOpen(false); flashToast('Bem-vindo de volta ✓'); }}>{authMode === 'login' ? 'Entrar' : 'Criar conta'}</Btn>
+                            {authMode === 'register' && <input value={authForm.name} onChange={(e) => setAuthForm((f) => ({ ...f, name: e.target.value }))} placeholder="Nome de usuário" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none;margin-bottom:11px')} />}
+                            <input value={authForm.email} onChange={(e) => setAuthForm((f) => ({ ...f, email: e.target.value }))} placeholder="E-mail" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none;margin-bottom:11px')} />
+                            <input value={authForm.password} onChange={(e) => setAuthForm((f) => ({ ...f, password: e.target.value }))} onKeyDown={(e) => { if (e.key === 'Enter' && authMode === 'login') doAuth(); }} type="password" placeholder="Senha" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none;margin-bottom:11px')} />
+                            {authMode === 'register' && <input value={authForm.password_confirmation} onChange={(e) => setAuthForm((f) => ({ ...f, password_confirmation: e.target.value }))} type="password" placeholder="Confirmar senha" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none;margin-bottom:16px')} />}
+                            <Btn s="width:100%;height:50px;border-radius:12px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:800;font-size:15px;font-family:Archivo,sans-serif" onClick={doAuth}>{authBusy ? '...' : authMode === 'login' ? 'Entrar' : 'Criar conta'}</Btn>
                             <div style={css('text-align:center;margin-top:18px;color:#9a9aa6;font-size:13.5px')}>
                                 {authMode === 'login' ? (
                                     <><span>Não tem conta? </span><span onClick={() => setAuthMode('register')} style={css('color:#c084fc;font-weight:700;cursor:pointer')}>Criar conta</span></>

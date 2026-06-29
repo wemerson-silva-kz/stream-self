@@ -71,11 +71,16 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	c := &client{sub: claims.Sub, send: make(chan []byte, sendBuffer)}
+	c := &client{sub: claims.Sub, send: make(chan []byte, sendBuffer), cancel: cancel}
 	if first := s.hub.add(liveID, c); first {
 		go s.hub.runRedis(ctx, liveID)
 	}
 	defer s.hub.remove(liveID, c)
+
+	// Presença: gauge de viewers (real) consumido pelas métricas do dashboard.
+	s.rdb.Incr(ctx, viewersKey(liveID))
+	s.rdb.Expire(ctx, viewersKey(liveID), 12*time.Hour)
+	defer s.rdb.Decr(context.Background(), viewersKey(liveID))
 
 	s.hub.Publish(ctx, Outbound{Type: "join", Live: liveID, TS: time.Now().Unix(),
 		User: &UserRef{ID: claims.Sub, Name: claims.Name}})
@@ -134,8 +139,20 @@ func (s *Server) readPump(ctx context.Context, conn *websocket.Conn, c *client, 
 		}
 		s.hub.Publish(ctx, out)
 		s.enqueuePersist(ctx, out) // grava async no Postgres via worker
+		s.countMessage(ctx, liveID)
 	}
 }
+
+// countMessage incrementa o contador de mensagens da janela de 1 minuto atual.
+// As métricas (msgs/min) leem a janela corrente.
+func (s *Server) countMessage(ctx context.Context, liveID int64) {
+	minute := time.Now().Unix() / 60
+	key := "msgs:" + itoa(liveID) + ":" + strconv.FormatInt(minute, 10)
+	s.rdb.Incr(ctx, key)
+	s.rdb.Expire(ctx, key, 2*time.Minute)
+}
+
+func viewersKey(liveID int64) string { return "viewers:" + itoa(liveID) }
 
 // enqueuePersist empurra a mensagem para um Redis Stream consumido pelo worker.
 func (s *Server) enqueuePersist(ctx context.Context, out Outbound) {
