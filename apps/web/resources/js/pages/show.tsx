@@ -21,6 +21,16 @@ type PageProps = {
     auth: { user: { name: string } | null; tier: 'free' | 'paid' };
     myLive: MyLive | null;
     episodes: Array<{ id: number; title: string; date: string; dur: string; views: string; cat: string; subscribers_only: boolean }> | null;
+    billing: { driver: string };
+    flash: { checkout: CheckoutResult | null; status: string | null };
+};
+type CheckoutResult = {
+    provider: string;
+    method: string;
+    pix_code: string | null;
+    qr_image: string | null;
+    redirect_url: string | null;
+    auto_confirmable: boolean;
 };
 
 // ============================================================================
@@ -110,7 +120,9 @@ const clipDur = (a: number, b: number) => {
 };
 
 export default function Show() {
-    const { endpoints, auth, myLive, episodes } = usePage<PageProps>().props;
+    const { endpoints, auth, myLive, episodes, billing, flash } = usePage<PageProps>().props;
+    // cobrança real devolvida pelo backend (PIX/redirect), substitui o mock
+    const [realCheckout, setRealCheckout] = useState<CheckoutResult | null>(null);
     // episódios reais (VODs) quando houver; senão o preview de demonstração
     const episodeList = episodes ?? EPISODES.map((e, i) => ({ ...e, id: i, subscribers_only: false }));
     const [newLiveTitle, setNewLiveTitle] = useState('');
@@ -168,6 +180,21 @@ export default function Show() {
     useEffect(() => {
         setTier(auth.tier);
     }, [auth.tier]);
+
+    // resultado de cobrança real: Stripe redireciona; PIX (MP/Asaas) exibe QR/código
+    useEffect(() => {
+        const c = flash.checkout;
+        if (!c) return;
+        if (c.redirect_url) {
+            window.location.href = c.redirect_url;
+            return;
+        }
+        if (c.pix_code) {
+            setRealCheckout(c);
+            setView('checkout');
+            setPayTab('pix');
+        }
+    }, [flash.checkout]);
 
     // ---- sessão real (token JWT + chat WS + hls.js), com fallback simulado ----
     const { session, tokenError, chatLive, liveMessages, sendLive, attachPlayer } = useLiveSession(endpoints.token, view === 'live');
@@ -323,8 +350,14 @@ export default function Show() {
                 preserveScroll: true,
                 onSuccess: () => {
                     setPaywallOpen(false);
-                    setView('live');
-                    flashToast('Assinatura ativa — acesso liberado ✓', 2800);
+                    if (billing.driver === 'stub') {
+                        // stub confirma na hora -> tier paid via props
+                        setView('live');
+                        flashToast('Assinatura ativa — acesso liberado ✓', 2800);
+                    } else {
+                        // drivers reais: o efeito de flash.checkout exibe PIX/redirect
+                        flashToast('Gerando cobrança...', 1500);
+                    }
                 },
                 onError: () => flashToast('Não foi possível concluir o pagamento'),
             },
@@ -704,17 +737,22 @@ export default function Show() {
                                 </div>
 
                                 <div style={css('border-radius:16px;background:#101016;border:1px solid #1f1f27;padding:24px')}>
-                                    {payTab === 'pix' && (
+                                    {payTab === 'pix' && (() => {
+                                        const pixCode = realCheckout?.pix_code ?? PIX_CODE;
+                                        const qr = realCheckout?.qr_image ?? null;
+                                        return (
                                         <div style={css('display:flex;gap:24px;align-items:flex-start')}>
-                                            <QrCode size={172} />
+                                            {qr ? <img src={qr} alt="QR PIX" style={css('width:172px;height:172px;flex-shrink:0;border-radius:12px;background:#fff')} /> : <QrCode size={172} />}
                                             <div style={css('flex:1;min-width:0')}>
-                                                <div style={css('display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;margin-bottom:5px')}>PIX <span style={css('height:20px;padding:0 8px;border-radius:5px;background:#16261c;border:1px solid #1f5135;color:#34d399;font-size:11px;font-weight:700;display:inline-flex;align-items:center')}>aprovação na hora</span></div>
+                                                <div style={css('display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;margin-bottom:5px')}>PIX <span style={css('height:20px;padding:0 8px;border-radius:5px;background:#16261c;border:1px solid #1f5135;color:#34d399;font-size:11px;font-weight:700;display:inline-flex;align-items:center')}>{realCheckout ? 'aguardando pagamento' : 'aprovação na hora'}</span></div>
                                                 <div style={css('color:#8a8a96;font-size:13px;line-height:1.5;margin-bottom:13px')}>Escaneie o QR code no app do seu banco, ou copie o código abaixo.</div>
-                                                <div style={css("font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#9a9aa6;background:#15151c;border:1px solid #23232c;border-radius:9px;padding:11px 13px;line-height:1.4;word-break:break-all;max-height:64px;overflow:hidden")}>{PIX_CODE}</div>
-                                                <Btn s="margin-top:11px;height:40px;width:100%;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-weight:700;font-size:14px;cursor:pointer;font-family:Archivo,sans-serif" onClick={() => copy(PIX_CODE, 'pix')}>{copied.pix ? <span style={css('color:#34d399')}>✓ Código copiado</span> : <span>⧉ Copiar código PIX</span>}</Btn>
+                                                <div style={css("font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#9a9aa6;background:#15151c;border:1px solid #23232c;border-radius:9px;padding:11px 13px;line-height:1.4;word-break:break-all;max-height:64px;overflow:hidden")}>{pixCode}</div>
+                                                <Btn s="margin-top:11px;height:40px;width:100%;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-weight:700;font-size:14px;cursor:pointer;font-family:Archivo,sans-serif" onClick={() => copy(pixCode, 'pix')}>{copied.pix ? <span style={css('color:#34d399')}>✓ Código copiado</span> : <span>⧉ Copiar código PIX</span>}</Btn>
+                                                {!realCheckout && billing.driver !== 'stub' && <div style={css('margin-top:9px;color:#6a6a76;font-size:11.5px')}>Driver ativo: <strong style={css('color:#9a9aa6')}>{billing.driver}</strong> — clique em Confirmar para gerar a cobrança real.</div>}
                                             </div>
                                         </div>
-                                    )}
+                                        );
+                                    })()}
                                     {payTab === 'card' && (
                                         <div style={css('animation:fadein .25s ease')}>
                                             <Field label="NÚMERO DO CARTÃO"><input placeholder="0000 0000 0000 0000" style={css("width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:'JetBrains Mono',monospace;outline:none")} /></Field>

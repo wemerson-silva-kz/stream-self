@@ -58,6 +58,25 @@ class MercadoPagoTest extends TestCase
         $this->assertNotNull($sub->current_period_end);
     }
 
+    public function test_subscribe_flashes_real_pix_checkout_to_front()
+    {
+        $user = User::factory()->create();
+        Http::fake(['api.mercadopago.com/v1/payments' => Http::response([
+            'id' => 1, 'status' => 'pending',
+            'point_of_interaction' => ['transaction_data' => [
+                'qr_code' => '00020126-REAL-PIX', 'qr_code_base64' => base64_encode('PNG'),
+            ]],
+        ], 201)]);
+
+        $this->actingAs($user)->post('/billing/subscribe', ['method' => 'pix'])
+            ->assertRedirect()
+            ->assertSessionHas('checkout');
+
+        $checkout = session('checkout');
+        $this->assertSame('00020126-REAL-PIX', $checkout['pix_code']);
+        $this->assertStringStartsWith('data:image/png;base64,', $checkout['qr_image']);
+    }
+
     public function test_rejected_payment_marks_past_due()
     {
         $user = User::factory()->create();

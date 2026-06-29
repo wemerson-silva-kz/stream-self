@@ -34,6 +34,8 @@ class ShowController extends Controller
             'myLive' => $this->ownerLive($request),
             // Episódios reais (VODs). null = front usa o preview de demonstração.
             'episodes' => $this->episodes(),
+            // Billing: driver ativo (stub confirma na hora; reais geram PIX/redirect).
+            'billing' => ['driver' => (string) config('billing.driver', 'stub')],
         ]);
     }
 

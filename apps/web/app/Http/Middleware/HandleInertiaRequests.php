@@ -44,6 +44,11 @@ class HandleInertiaRequests extends Middleware
                 'tier' => $request->user()?->activeSubscription() ? 'paid' : 'free',
             ],
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
+            // Resultado de uma cobrança recém-criada (PIX/redirect) p/ o checkout.
+            'flash' => [
+                'checkout' => fn () => $request->session()->get('checkout'),
+                'status' => fn () => $request->session()->get('status'),
+            ],
         ];
     }
 }
