@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Encoder seleciona o codec: "h264_nvenc" (GPU) ou "libx264" (CPU).
@@ -34,6 +35,39 @@ func (p *Pipeline) listSize() int {
 		return p.ListSize
 	}
 	return 30
+}
+
+// nextSegNumber devolve o próximo índice de segmento TS livre no diretório do
+// VOD (maior seg_N.ts existente + 1), para continuar a gravação após reconexão.
+func nextSegNumber(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	max := -1
+	for _, e := range entries {
+		var n int
+		if _, err := fmt.Sscanf(e.Name(), "seg_%d.ts", &n); err == nil && n > max {
+			max = n
+		}
+	}
+	return max + 1
+}
+
+// cleanVodDir remove resíduos de uma gravação anterior (segmentos, init e
+// playlists) para iniciar um VOD limpo.
+func cleanVodDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".m4s") ||
+			strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".m3u8") {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 // Variantes ABR: rótulo, escala, bitrate alvo (kbps).
@@ -71,6 +105,13 @@ func (p *Pipeline) run(ctx context.Context, liveID int64, inputArgs []string, st
 	vodDir := filepath.Join(outDir, "vod")
 	if err := os.MkdirAll(vodDir, 0o755); err != nil {
 		return err
+	}
+	// Continuidade da gravação: se já há segmentos .ts, é uma RECONEXÃO — continua
+	// de onde parou. Senão é um INÍCIO — limpa resíduos (inclui fmp4 legado) p/ um
+	// playlist VOD limpo.
+	vodStart := nextSegNumber(vodDir)
+	if vodStart == 0 {
+		cleanVodDir(vodDir)
 	}
 
 	enc := p.Encoder
@@ -115,18 +156,22 @@ func (p *Pipeline) run(ctx context.Context, liveID int64, inputArgs []string, st
 		filepath.Join(outDir, "%v", "index.m3u8"),
 	)
 
-	// Saída de GRAVAÇÃO (VOD): 720p, playlist 'event' (cresce e nunca deleta
-	// segmentos). Vira o replay/Episódio quando a live encerra.
+	// Saída de GRAVAÇÃO (VOD): 720p, playlist 'event' (cresce, nunca deleta).
+	// CONTINUIDADE entre reconexões do OBS: usamos MPEG-TS (segmentos auto-
+	// contidos, sem init.mp4 compartilhado) + append_list + start_number a partir
+	// do último segmento já gravado — assim uma queda/reconexão NÃO apaga o que
+	// já foi gravado; o replay continua de onde parou (vodStart calculado acima).
 	args = append(args,
 		"-map", "[vodout]", "-map", "a:0",
 		"-c:v", enc, "-b:v", "3000k", "-maxrate", "3210k", "-bufsize", "4500k",
 		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
 		"-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
 		"-f", "hls", "-hls_time", "4", "-hls_playlist_type", "event",
-		"-hls_flags", "independent_segments+program_date_time",
-		"-hls_segment_type", "fmp4",
+		"-hls_flags", "independent_segments+program_date_time+append_list+omit_endlist",
+		"-hls_segment_type", "mpegts",
+		"-start_number", fmt.Sprintf("%d", vodStart),
 		"-master_pl_name", "master.m3u8",
-		"-hls_segment_filename", filepath.Join(vodDir, "seg_%d.m4s"),
+		"-hls_segment_filename", filepath.Join(vodDir, "seg_%d.ts"),
 		filepath.Join(vodDir, "index.m3u8"),
 	)
 

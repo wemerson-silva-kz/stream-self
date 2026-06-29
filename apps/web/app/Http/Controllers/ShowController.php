@@ -66,14 +66,20 @@ class ShowController extends Controller
             return null;
         }
 
+        $origin = rtrim((string) config('streaming.origin_url'), '/');
+
         return $vods->map(fn (\App\Models\Vod $v) => [
             'id' => $v->id,
             'title' => $v->title,
             'date' => $v->published_at?->translatedFormat('d M'),
             'dur' => $v->durationLabel(),
             'views' => $v->viewsLabel(),
-            'cat' => $v->category ?? 'Live',
+            'cat' => $v->category ?? 'Replay',
             'subscribers_only' => $v->visibility === 'subscribers',
+            // playback do replay gravado (vod/master.m3u8) + token da live de origem.
+            'live_id' => $v->live_id,
+            'playback_url' => $v->live_id && $v->playback_path ? $origin.$v->playback_path : null,
+            'token_url' => $v->live_id ? route('live.token', $v->live_id) : null,
         ])->all();
     }
 

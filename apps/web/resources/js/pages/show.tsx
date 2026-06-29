@@ -26,7 +26,10 @@ type PageProps = {
     endpoints: { token: string | null; metrics: string | null };
     auth: { user: { name: string } | null; tier: 'free' | 'paid' };
     myLive: MyLive | null;
-    episodes: Array<{ id: number; title: string; date: string; dur: string; views: string; cat: string; subscribers_only: boolean }> | null;
+    episodes: Array<{
+        id: number; title: string; date: string; dur: string; views: string; cat: string; subscribers_only: boolean;
+        live_id?: number | null; playback_url?: string | null; token_url?: string | null;
+    }> | null;
     billing: { driver: string };
     flash: { checkout: CheckoutResult | null; status: string | null };
 };
@@ -45,7 +48,8 @@ type CheckoutResult = {
 // paywall) e os pontos onde o backend real (token JWT, WS de chat) se conectam.
 // ============================================================================
 
-type View = 'home' | 'live' | 'checkout' | 'dashboard' | 'admin' | 'episodes' | 'clip';
+type View = 'home' | 'live' | 'checkout' | 'dashboard' | 'admin' | 'episodes' | 'clip' | 'vod';
+type Episode = NonNullable<PageProps['episodes']>[number];
 type Msg = { id: number; user: string; body: string; color: string; me?: boolean };
 type ModMsg = { id: number; user: string; body: string; flags: number; deleted: boolean };
 
@@ -156,6 +160,7 @@ export default function Show() {
     const videoRef = useRef<HTMLVideoElement>(null);
 
     const [view, setView] = useState<View>('home');
+    const [vodEpisode, setVodEpisode] = useState<Episode | null>(null);
     const [tier, setTier] = useState<'free' | 'paid'>(auth.tier);
     // formulário de auth (modal)
     const [authForm, setAuthForm] = useState({ name: '', email: '', password: '', password_confirmation: '' });
@@ -327,6 +332,20 @@ export default function Show() {
     const flashToast = (msg: string, ms = 2400) => {
         setToast(msg);
         setTimeout(() => setToast(''), ms);
+    };
+    // abre um episódio (replay). Gate: VOD de assinante exige tier paid.
+    const openEpisode = (e: Episode) => {
+        if (e.subscribers_only && tier !== 'paid') {
+            flashToast('Replay exclusivo para assinantes');
+            setView('checkout');
+            return;
+        }
+        if (!e.playback_url || !e.token_url) {
+            flashToast('Replay ainda não disponível');
+            return;
+        }
+        setVodEpisode(e);
+        setView('vod');
     };
     const copy = (text: string, flag: string) => {
         try {
@@ -770,7 +789,7 @@ export default function Show() {
                         </div>
                         <div style={css('display:grid;grid-template-columns:repeat(3,1fr);gap:22px')}>
                             {episodeList.map((e) => (
-                                <div key={e.id} onClick={go('live')} style={css('cursor:pointer;border-radius:14px;overflow:hidden;background:#121218;border:1px solid #1f1f27')}>
+                                <div key={e.id} onClick={() => openEpisode(e)} style={css('cursor:pointer;border-radius:14px;overflow:hidden;background:#121218;border:1px solid #1f1f27')}>
                                     <div style={css('position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#241a44,#120d22);overflow:hidden')}>
                                         <div style={css('position:absolute;inset:0;background:repeating-linear-gradient(125deg,rgba(139,92,246,.14) 0 13px,transparent 13px 28px)')} />
                                         <div style={css('position:absolute;inset:0;display:flex;align-items:center;justify-content:center')}>
@@ -791,6 +810,34 @@ export default function Show() {
                                     </div>
                                 </div>
                             ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* ===================== VOD / REPLAY ===================== */}
+                {view === 'vod' && vodEpisode && (
+                    <div style={css('max-width:1180px;margin:0 auto;padding:24px 32px 80px')}>
+                        <Btn s="height:38px;padding:0 14px;border-radius:9px;border:1px solid #2a2a34;background:#15151c;color:#c5c5cf;font-weight:600;font-size:13px;cursor:pointer;font-family:Archivo,sans-serif;margin-bottom:16px" onClick={() => setView('episodes')}>← Voltar aos episódios</Btn>
+                        <VodPlayer episode={vodEpisode} />
+                        <div style={css('display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:18px')}>
+                            <div style={css('min-width:0;flex:1')}>
+                                <div style={css('display:flex;align-items:center;gap:9px;margin-bottom:8px')}>
+                                    <span style={css('height:22px;padding:0 9px;border-radius:6px;background:#1a1530;border:1px solid #3a2a5c;color:#c084fc;font-size:11px;font-weight:800;letter-spacing:.5px;display:flex;align-items:center')}>VOD · REPLAY</span>
+                                    {vodEpisode.subscribers_only && <span style={css('height:22px;padding:0 9px;border-radius:6px;background:rgba(139,92,246,.92);color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center')}>★ ASSINANTE</span>}
+                                </div>
+                                <div style={css("font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:24px;letter-spacing:-.4px;line-height:1.2")}>{vodEpisode.title}</div>
+                                <div style={css('display:flex;align-items:center;gap:8px;margin-top:8px;color:#8a8a96;font-size:13.5px')}>
+                                    <span style={css('color:#8b5cf6;font-weight:600')}>{vodEpisode.cat}</span><span style={css('opacity:.5')}>·</span>
+                                    <span>{vodEpisode.date}</span><span style={css('opacity:.5')}>·</span><span>{vodEpisode.views} views</span><span style={css('opacity:.5')}>·</span><span>{vodEpisode.dur}</span>
+                                </div>
+                            </div>
+                            <div style={css('display:flex;align-items:center;gap:11px')}>
+                                <div style={css('width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px')}>{liveChannel[0]?.toUpperCase()}</div>
+                                <div>
+                                    <div style={css('font-weight:700;font-size:15px')}>{liveChannel}</div>
+                                    <div style={css('color:#7a7a86;font-size:12.5px')}>Replay disponível</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -1289,6 +1336,44 @@ function Stat({ label, value, sub, subColor, valueColor, mono }: { label: string
             <div style={css('color:#7a7a86;font-size:12.5px;font-weight:600;margin-bottom:8px')}>{label}</div>
             <div style={css(`font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:30px${valueColor ? ';color:' + valueColor : ''}`)}>{value}</div>
             {sub && <div style={css(`font-size:12.5px;margin-top:3px;color:${subColor ?? '#9a9aa6'}${mono ? ";font-family:'JetBrains Mono',monospace" : ''}`)}>{sub}</div>}
+        </div>
+    );
+}
+
+// Player de VOD/replay: hls.js + token (header) + controles nativos (seek/volume/fullscreen).
+function VodPlayer({ episode }: { episode: Episode }) {
+    const ref = useRef<HTMLVideoElement>(null);
+    const [err, setErr] = useState(false);
+    useEffect(() => {
+        setErr(false);
+        if (!episode.token_url || !episode.playback_url || !ref.current) return;
+        let hls: Hls | null = null;
+        let cancelled = false;
+        fetch(episode.token_url, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error())))
+            .then((s) => {
+                const video = ref.current;
+                if (cancelled || !video) return;
+                const url = episode.playback_url as string;
+                if (Hls.isSupported()) {
+                    hls = new Hls({ xhrSetup: (xhr) => xhr.setRequestHeader('Authorization', 'Bearer ' + s.token) });
+                    hls.loadSource(url);
+                    hls.attachMedia(video);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+                    hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) setErr(true); });
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = `${url}?token=${encodeURIComponent(s.token)}`;
+                    video.play().catch(() => {});
+                }
+            })
+            .catch(() => { if (!cancelled) setErr(true); });
+        return () => { cancelled = true; hls?.destroy(); };
+    }, [episode]);
+
+    return (
+        <div style={css('position:relative;aspect-ratio:16/9;background:#000;border-radius:14px;overflow:hidden')}>
+            <video ref={ref} controls playsInline style={css('width:100%;height:100%;object-fit:contain;background:#000')} />
+            {err && <div style={css('position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ff6b85;font-size:14px;background:rgba(0,0,0,.6)')}>Não foi possível carregar o replay.</div>}
         </div>
     );
 }
