@@ -469,9 +469,18 @@ export default function Show() {
     const [editForm, setEditForm] = useState({ title: myLive?.title ?? '', category: myLive?.category ?? '' });
     useEffect(() => { setEditForm({ title: myLive?.title ?? '', category: myLive?.category ?? '' }); }, [myLive?.id, myLive?.title, myLive?.category]);
     const saveLiveInfo = () => {
-        if (!myLive) return;
+        if (!myLive) {
+            flashToast('Crie uma live primeiro');
+            return;
+        }
+        if (!editForm.title.trim()) {
+            flashToast('O título não pode ficar vazio');
+            return;
+        }
         router.patch(`/streamer/lives/${myLive.id}`, { title: editForm.title, category: editForm.category }, {
-            preserveScroll: true, onSuccess: () => flashToast('Informações salvas ✓'),
+            preserveScroll: true,
+            onSuccess: () => flashToast('Informações salvas ✓'),
+            onError: (e) => flashToast(Object.values(e)[0] ?? 'Não foi possível salvar'),
         });
     };
     const uploadThumb = (file: File) => {
