@@ -60,14 +60,11 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, _ uint32, cmd *rtmpmsg.Ne
 	log.Printf("rtmp: publish válido, live=%d -> iniciando FFmpeg", liveID)
 
 	// Pipe: FLV escrito aqui -> lido pelo FFmpeg (stdin).
+	// IMPORTANTE: o leitor (FFmpeg) precisa iniciar ANTES do flv.NewEncoder,
+	// porque o encoder escreve o header FLV de imediato no io.Pipe (síncrono) e
+	// bloquearia sem um leitor — derrubando a publicação.
 	pr, pw := io.Pipe()
 	h.pw = pw
-	enc, err := flv.NewEncoder(pw, flv.FlagsAudio|flv.FlagsVideo)
-	if err != nil {
-		return err
-	}
-	h.enc = enc
-
 	pctx, cancel := context.WithCancel(h.ctx)
 	h.cancel = cancel
 	go func() {
@@ -75,6 +72,12 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, _ uint32, cmd *rtmpmsg.Ne
 			log.Printf("rtmp: ffmpeg encerrou: %v", err)
 		}
 	}()
+
+	enc, err := flv.NewEncoder(pw, flv.FlagsAudio|flv.FlagsVideo)
+	if err != nil {
+		return err
+	}
+	h.enc = enc
 	return nil
 }
 
