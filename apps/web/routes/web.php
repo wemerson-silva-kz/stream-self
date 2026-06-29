@@ -34,6 +34,7 @@ Route::middleware('auth')->group(function () {
     Route::post('streamer/lives', [StreamerController::class, 'store'])->name('streamer.lives.store');
     Route::patch('streamer/lives/{live}', [StreamerController::class, 'update'])->name('streamer.lives.update');
     Route::post('streamer/lives/{live}/rotate-key', [StreamerController::class, 'rotateKey'])->name('streamer.lives.rotate');
+    Route::post('streamer/lives/{live}/thumbnail', [StreamerController::class, 'uploadThumbnail'])->name('streamer.lives.thumbnail');
 
     // Moderação (só o dono): publica eventos no Redis pros nós de chat.
     Route::post('streamer/lives/{live}/moderation/delete', [ModerationController::class, 'deleteMessage'])->name('mod.delete');

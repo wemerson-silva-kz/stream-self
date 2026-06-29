@@ -1,22 +1,28 @@
 import { Head, router, usePage } from '@inertiajs/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Hls from 'hls.js';
 import { css } from '@/lib/css';
 import { useLiveSession } from '@/hooks/use-live-session';
 
 type MyLive = {
     id: number;
     title: string;
+    category: string | null;
     slug: string;
     status: string;
     visibility: string;
     freemium_seconds: number | null;
     is_featured: boolean;
+    thumbnail_url: string | null;
     stream_key: string | null;
     rtmp_url: string;
     srt_url: string;
 };
 type PageProps = {
-    live: { id: number; slug: string; title: string; status: string } | null;
+    live: {
+        id: number; slug: string; title: string; category: string | null; status: string;
+        is_live: boolean; started_at: string | null; thumbnail_url: string | null; preview_url: string | null; channel: string;
+    } | null;
     endpoints: { token: string | null; metrics: string | null };
     auth: { user: { name: string } | null; tier: 'free' | 'paid' };
     myLive: MyLive | null;
@@ -120,7 +126,26 @@ const clipDur = (a: number, b: number) => {
 };
 
 export default function Show() {
-    const { endpoints, auth, myLive, episodes, billing, flash } = usePage<PageProps>().props;
+    const { live, endpoints, auth, myLive, episodes, billing, flash } = usePage<PageProps>().props;
+    // metadados reais da live (com fallbacks de exibição)
+    const liveTitle = live?.title ?? 'Sem transmissões ainda';
+    const liveCategory = live?.category ?? 'Podcast';
+    const liveChannel = live?.channel ?? 'brunoaiubshow';
+    const isLiveNow = !!live?.is_live;
+    const liveThumb = live?.thumbnail_url ?? null;
+    const [nowTs, setNowTs] = useState(() => Date.now());
+    useEffect(() => {
+        const t = setInterval(() => setNowTs(Date.now()), 1000);
+        return () => clearInterval(t);
+    }, []);
+    const liveElapsedLabel = useMemo(() => {
+        if (!live?.started_at) return '0:00:00';
+        const secs = Math.max(0, Math.floor((nowTs - new Date(live.started_at).getTime()) / 1000));
+        const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+        return `${h}:${m < 10 ? '0' + m : m}:${s < 10 ? '0' + s : s}`;
+    }, [nowTs, live?.started_at]);
+    // poster: capa enviada > frame da live (atualiza a cada ~2s) > sem imagem
+    const livePoster = liveThumb ?? (live?.preview_url ? `${live.preview_url}?t=${Math.floor(nowTs / 2000)}` : null);
     // cobrança real devolvida pelo backend (PIX/redirect), substitui o mock
     const [realCheckout, setRealCheckout] = useState<CheckoutResult | null>(null);
     // episódios reais (VODs) quando houver; senão o preview de demonstração
@@ -197,7 +222,10 @@ export default function Show() {
     }, [flash.checkout]);
 
     // ---- sessão real (token JWT + chat WS + hls.js), com fallback simulado ----
-    const { session, tokenError, chatLive, liveMessages, sendLive, attachPlayer } = useLiveSession(endpoints.token, view === 'live');
+    const { session, tokenError, chatLive, liveMessages, sendLive, attachPlayer, levels, currentLevel, setLevel, seekToLive } = useLiveSession(endpoints.token, view === 'live');
+    const [volume, setVolume] = useState(1);
+    const [resMenu, setResMenu] = useState(false);
+    const [paused, setPaused] = useState(false); // pausa real do vídeo (DVR), sem desanexar
 
     // chat simulado: só roda enquanto o WS real NÃO estiver conectado ----------
     useEffect(() => {
@@ -218,12 +246,28 @@ export default function Show() {
         return () => detach?.();
     }, [view, playing, session, attachPlayer]);
 
+    // aplica volume/mute ao elemento de vídeo real
+    useEffect(() => {
+        if (videoRef.current) {
+            videoRef.current.volume = volume;
+            videoRef.current.muted = muted;
+        }
+    }, [volume, muted, playing]);
+
+    const toggleFullscreen = () => {
+        const el = videoRef.current?.parentElement; // container do player
+        if (!el) return;
+        if (document.fullscreenElement) document.exitFullscreen();
+        else el.requestFullscreen?.();
+    };
+    const resLabel = currentLevel === -1 ? 'Auto' : `${levels.find((l) => l.index === currentLevel)?.height ?? ''}p`;
+
     // mensagens exibidas: reais (WS) quando conectado, senão as simuladas -------
     const shownMessages = chatLive ? liveMessages : messages;
 
-    // polling de métricas reais (viewers/msgs) quando no painel de streamer/mod
+    // polling de métricas reais (viewers/msgs) na home/live/painel
     useEffect(() => {
-        if ((view !== 'dashboard' && view !== 'admin') || !endpoints.metrics) return;
+        if (!endpoints.metrics || !['home', 'live', 'dashboard', 'admin'].includes(view)) return;
         const url = endpoints.metrics;
         let alive = true;
         const tick = () => {
@@ -403,6 +447,21 @@ export default function Show() {
             onSuccess: () => flashToast(next === 'live' ? 'No ar ✓' : 'Transmissão encerrada'),
         });
     };
+    const [editForm, setEditForm] = useState({ title: myLive?.title ?? '', category: myLive?.category ?? '' });
+    useEffect(() => { setEditForm({ title: myLive?.title ?? '', category: myLive?.category ?? '' }); }, [myLive?.id, myLive?.title, myLive?.category]);
+    const saveLiveInfo = () => {
+        if (!myLive) return;
+        router.patch(`/streamer/lives/${myLive.id}`, { title: editForm.title, category: editForm.category }, {
+            preserveScroll: true, onSuccess: () => flashToast('Informações salvas ✓'),
+        });
+    };
+    const uploadThumb = (file: File) => {
+        if (!myLive) return;
+        router.post(`/streamer/lives/${myLive.id}/thumbnail`, { thumbnail: file }, {
+            preserveScroll: true, forceFormData: true, onSuccess: () => flashToast('Thumbnail atualizada ✓'),
+            onError: (e) => flashToast(Object.values(e)[0] ?? 'Falha no upload'),
+        });
+    };
 
     const sec = freeRemaining % 60;
     const mm = Math.floor(freeRemaining / 60);
@@ -474,55 +533,72 @@ export default function Show() {
                 {view === 'home' && (
                     <div style={css('max-width:1180px;margin:0 auto;padding:32px 32px 80px')}>
                         <div style={css('display:flex;align-items:center;gap:11px;margin-bottom:18px')}>
-                            <span style={css('display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:8px;background:#2a0f17;border:1px solid #5c1f2c;color:#ff6b85;font-size:12px;font-weight:800;letter-spacing:.5px')}>
-                                <span style={css('width:8px;height:8px;border-radius:50%;background:#ff3b5c;animation:pulse 1.4s infinite')} />AO VIVO AGORA
-                            </span>
-                            <span style={css('color:#8a8a96;font-size:14px')}><strong style={css('color:#fff')}>brunoaiubshow</strong> está transmitindo neste momento</span>
+                            {isLiveNow ? (
+                                <>
+                                    <span style={css('display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:8px;background:#2a0f17;border:1px solid #5c1f2c;color:#ff6b85;font-size:12px;font-weight:800;letter-spacing:.5px')}>
+                                        <span style={css('width:8px;height:8px;border-radius:50%;background:#ff3b5c;animation:pulse 1.4s infinite')} />AO VIVO AGORA
+                                    </span>
+                                    <span style={css('color:#8a8a96;font-size:14px')}><strong style={css('color:#fff')}>{liveChannel}</strong> está transmitindo neste momento</span>
+                                </>
+                            ) : (
+                                <span style={css('color:#8a8a96;font-size:14px')}>Nenhuma transmissão ao vivo agora — veja a <strong style={css('color:#fff')}>última</strong> abaixo</span>
+                            )}
                         </div>
 
                         <div onClick={go('live')} style={css('border-radius:20px;overflow:hidden;border:1px solid #262630;background:#121218;cursor:pointer;margin-bottom:20px')}>
                             <div style={css('position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#2a1d4d,#120d22);overflow:hidden')}>
-                                <div style={css('position:absolute;inset:0;background:repeating-linear-gradient(125deg,rgba(139,92,246,.15) 0 16px,transparent 16px 34px)')} />
-                                <div style={css('position:absolute;inset:0;display:flex;align-items:center;justify-content:center')}>
-                                    <div style={css('width:88px;height:88px;border-radius:50%;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center')}>
+                                {livePoster ? (
+                                    <img src={livePoster} alt="thumb" style={css('position:absolute;inset:0;width:100%;height:100%;object-fit:cover')} />
+                                ) : (
+                                    <div style={css('position:absolute;inset:0;background:repeating-linear-gradient(125deg,rgba(139,92,246,.15) 0 16px,transparent 16px 34px)')} />
+                                )}
+                                {isLiveNow && <HoverPreview tokenUrl={endpoints.token} poster={livePoster} />}
+                                <div style={css('position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none')}>
+                                    <div style={css('width:88px;height:88px;border-radius:50%;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center')}>
                                         <div style={css('width:0;height:0;border-top:16px solid transparent;border-bottom:16px solid transparent;border-left:25px solid #fff;margin-left:6px')} />
                                     </div>
                                 </div>
                                 <div style={css('position:absolute;top:18px;left:18px;display:flex;align-items:center;gap:9px')}>
-                                    <span style={css('display:flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;background:#ff3b5c;color:#fff;font-size:13px;font-weight:800;letter-spacing:.5px')}>
-                                        <span style={css('width:8px;height:8px;border-radius:50%;background:#fff;animation:pulse 1.4s infinite')} />AO VIVO
-                                    </span>
-                                    <span style={css('height:30px;padding:0 12px;border-radius:8px;background:rgba(0,0,0,.55);display:flex;align-items:center;color:#fff;font-size:13px;font-weight:600')}>👁 14.207 assistindo</span>
+                                    {isLiveNow ? (
+                                        <span style={css('display:flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;background:#ff3b5c;color:#fff;font-size:13px;font-weight:800;letter-spacing:.5px')}>
+                                            <span style={css('width:8px;height:8px;border-radius:50%;background:#fff;animation:pulse 1.4s infinite')} />AO VIVO
+                                        </span>
+                                    ) : (
+                                        <span style={css('height:30px;padding:0 12px;border-radius:8px;background:rgba(0,0,0,.6);display:flex;align-items:center;color:#c084fc;font-size:13px;font-weight:800;letter-spacing:.5px')}>● GRAVADO</span>
+                                    )}
+                                    {isLiveNow && <span style={css('height:30px;padding:0 12px;border-radius:8px;background:rgba(0,0,0,.55);display:flex;align-items:center;color:#fff;font-size:13px;font-weight:600')}>👁 {viewersLabel} assistindo</span>}
                                 </div>
                                 <div style={css('position:absolute;bottom:0;left:0;right:0;padding:60px 24px 22px;background:linear-gradient(0deg,rgba(8,8,12,.94),rgba(8,8,12,.4) 60%,transparent)')}>
                                     <div style={css('display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap')}>
                                         <div style={css('min-width:0;flex:1')}>
                                             <div style={css('display:flex;align-items:center;gap:11px;margin-bottom:11px')}>
-                                                <div style={css('width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;flex-shrink:0')}>B</div>
+                                                <div style={css('width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;flex-shrink:0')}>{liveChannel[0]?.toUpperCase()}</div>
                                                 <div>
-                                                    <div style={css('font-weight:700;font-size:15px')}>brunoaiubshow</div>
-                                                    <div style={css('color:#c084fc;font-size:13px;font-weight:600')}>League of Legends</div>
+                                                    <div style={css('font-weight:700;font-size:15px')}>{liveChannel}</div>
+                                                    <div style={css('color:#c084fc;font-size:13px;font-weight:600')}>{liveCategory}</div>
                                                 </div>
                                             </div>
-                                            <div style={css("font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:27px;line-height:1.15;letter-spacing:-.6px")}>RANKED ATÉ CHALLENGER — reação ao patch 14.12</div>
+                                            <div style={css("font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:27px;line-height:1.15;letter-spacing:-.6px")}>{liveTitle}</div>
                                         </div>
-                                        <Btn s="flex-shrink:0;height:50px;padding:0 28px;border-radius:13px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:800;font-size:16px;font-family:Archivo,sans-serif" onClick={go('live')}>▶ Assistir agora</Btn>
+                                        <Btn s="flex-shrink:0;height:50px;padding:0 28px;border-radius:13px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:800;font-size:16px;font-family:Archivo,sans-serif" onClick={go('live')}>▶ {isLiveNow ? 'Assistir agora' : 'Ver gravação'}</Btn>
                                     </div>
                                 </div>
                             </div>
-                            <div style={css('display:flex;border-top:1px solid #1f1f27')}>
-                                {[
-                                    { v: '14.207', l: 'assistindo agora' },
-                                    { v: '1h 42min', l: 'no ar' },
-                                    { v: '1080p60', l: 'Full HD · LL-HLS' },
-                                    { v: '312/min', l: 'no chat', c: '#34d399' },
-                                ].map((s, i, arr) => (
-                                    <div key={i} style={css(`flex:1;padding:16px 18px;text-align:center${i < arr.length - 1 ? ';border-right:1px solid #1f1f27' : ''}`)}>
-                                        <div style={css(`font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:19px${s.c ? ';color:' + s.c : ''}`)}>{s.v}</div>
-                                        <div style={css('color:#7a7a86;font-size:12px;margin-top:2px')}>{s.l}</div>
-                                    </div>
-                                ))}
-                            </div>
+                            {isLiveNow && (
+                                <div style={css('display:flex;border-top:1px solid #1f1f27')}>
+                                    {[
+                                        { v: viewersLabel, l: 'assistindo agora' },
+                                        { v: liveElapsedLabel, l: 'no ar' },
+                                        { v: '1080p60', l: 'Full HD · LL-HLS' },
+                                        { v: msgsLabel + '/min', l: 'no chat', c: '#34d399' },
+                                    ].map((s, i, arr) => (
+                                        <div key={i} style={css(`flex:1;padding:16px 18px;text-align:center${i < arr.length - 1 ? ';border-right:1px solid #1f1f27' : ''}`)}>
+                                            <div style={css(`font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:19px${s.c ? ';color:' + s.c : ''}`)}>{s.v}</div>
+                                            <div style={css('color:#7a7a86;font-size:12px;margin-top:2px')}>{s.l}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
 
                         <div style={css('display:grid;grid-template-columns:1.5fr 1fr;gap:18px;align-items:stretch')}>
@@ -549,53 +625,74 @@ export default function Show() {
                     <div style={css('display:grid;grid-template-columns:1fr 350px;height:calc(100vh - 64px)')}>
                         <div style={css('overflow-y:auto;border-right:1px solid #1b1b23')}>
                             <div onClick={() => setPlaying((p) => !p)} style={css('position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#241a44,#0f0b1d);overflow:hidden;cursor:pointer')}>
-                                {/* player real (LL-HLS). Fica visível quando há token+stream; senão o placeholder abaixo cobre */}
-                                <video ref={videoRef} playsInline muted={muted} style={css(`position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;${session && playing ? '' : 'display:none'}`)} />
-                                {playing ? (
+                                {/* player real (LL-HLS): sobre tudo quando há vídeo. Sem listras por cima. */}
+                                <video ref={videoRef} playsInline muted={muted} style={css(`position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:1;${session && playing ? '' : 'display:none'}`)} />
+                                {/* listras animadas: SÓ no modo demo (sem stream real conectado) */}
+                                {playing && !session && (
                                     <div style={css('position:absolute;inset:-30px;background:repeating-linear-gradient(125deg,rgba(139,92,246,.17) 0 16px,transparent 16px 34px);animation:drift 2.2s linear infinite')} />
-                                ) : (
+                                )}
+                                {/* placeholder (não tocando): thumbnail (poster) ou listras + botão play */}
+                                {!playing && (
                                     <>
-                                        <div style={css('position:absolute;inset:0;background:repeating-linear-gradient(125deg,rgba(139,92,246,.13) 0 16px,transparent 16px 34px)')} />
+                                        {livePoster ? (
+                                            <img src={livePoster} alt="thumb" style={css('position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.7')} />
+                                        ) : (
+                                            <div style={css('position:absolute;inset:0;background:repeating-linear-gradient(125deg,rgba(139,92,246,.13) 0 16px,transparent 16px 34px)')} />
+                                        )}
                                         <div style={css('position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px')}>
                                             <div style={css('width:80px;height:80px;border-radius:50%;background:rgba(139,92,246,.92);box-shadow:0 8px 34px rgba(139,92,246,.5);display:flex;align-items:center;justify-content:center')}>
                                                 <div style={css('width:0;height:0;border-top:15px solid transparent;border-bottom:15px solid transparent;border-left:24px solid #fff;margin-left:6px')} />
                                             </div>
-                                            <div style={css("font-family:'JetBrains Mono',monospace;font-size:12px;color:rgba(255,255,255,.55);letter-spacing:1px")}>clique para assistir · LL-HLS 1080p60</div>
+                                            <div style={css("font-family:'JetBrains Mono',monospace;font-size:12px;color:rgba(255,255,255,.7);letter-spacing:1px")}>{isLiveNow ? 'clique para assistir · AO VIVO' : 'última transmissão · clique para ver'}</div>
                                         </div>
                                     </>
                                 )}
-                                <div style={css('position:absolute;top:16px;left:16px;display:flex;align-items:center;gap:8px')}>
-                                    <span style={css('display:flex;align-items:center;gap:6px;height:28px;padding:0 11px;border-radius:7px;background:#ff3b5c;color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px')}>
-                                        <span style={css('width:7px;height:7px;border-radius:50%;background:#fff;animation:pulse 1.4s infinite')} />AO VIVO
-                                    </span>
-                                    <span style={css('height:28px;padding:0 11px;border-radius:7px;background:rgba(0,0,0,.55);display:flex;align-items:center;color:#fff;font-size:12px;font-weight:600')}>👁 14.207</span>
+                                <div style={css('position:absolute;top:16px;left:16px;display:flex;align-items:center;gap:8px;z-index:2')}>
+                                    {isLiveNow ? (
+                                        <span style={css('display:flex;align-items:center;gap:6px;height:28px;padding:0 11px;border-radius:7px;background:#ff3b5c;color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px')}>
+                                            <span style={css('width:7px;height:7px;border-radius:50%;background:#fff;animation:pulse 1.4s infinite')} />AO VIVO
+                                        </span>
+                                    ) : (
+                                        <span style={css('display:flex;align-items:center;height:28px;padding:0 11px;border-radius:7px;background:rgba(0,0,0,.6);color:#c084fc;font-size:12px;font-weight:800;letter-spacing:.5px')}>● GRAVADO</span>
+                                    )}
+                                    {isLiveNow && <span style={css('height:28px;padding:0 11px;border-radius:7px;background:rgba(0,0,0,.55);display:flex;align-items:center;color:#fff;font-size:12px;font-weight:600')}>👁 {viewersLabel}</span>}
                                 </div>
                                 {isPaid && (
-                                    <div style={css('position:absolute;top:54px;left:16px;display:flex;align-items:center;gap:9px;height:28px;padding:0 11px;border-radius:8px;background:rgba(22,38,28,.85);border:1px solid #1f5135;color:#34d399;font-size:12px;font-weight:700;backdrop-filter:blur(6px);width:fit-content')}>★ PREMIUM · sem paywall</div>
+                                    <div style={css('position:absolute;top:54px;left:16px;display:flex;align-items:center;gap:9px;height:28px;padding:0 11px;border-radius:8px;background:rgba(22,38,28,.85);border:1px solid #1f5135;color:#34d399;font-size:12px;font-weight:700;backdrop-filter:blur(6px);width:fit-content;z-index:2')}>★ PREMIUM · sem paywall</div>
                                 )}
-                                {paywallOpen && <div style={css('position:absolute;inset:0;background:rgba(8,8,12,.72);backdrop-filter:blur(8px)')} />}
+                                {paywallOpen && <div style={css('position:absolute;inset:0;background:rgba(8,8,12,.72);backdrop-filter:blur(8px);z-index:3')} />}
                                 {playing && (
-                                    <div style={css('position:absolute;left:0;right:0;bottom:0;padding:30px 16px 12px;background:linear-gradient(0deg,rgba(8,8,12,.85),transparent);display:flex;align-items:center;gap:14px')}>
-                                        <Btn s="width:34px;height:34px;border-radius:8px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:14px;display:flex;align-items:center;justify-content:center" onClick={(e) => { e.stopPropagation(); setPlaying((p) => !p); }}>❚❚</Btn>
-                                        <Btn s="width:34px;height:34px;border-radius:8px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:15px;display:flex;align-items:center;justify-content:center" onClick={(e) => { e.stopPropagation(); setMuted((m) => !m); }}>{muted ? '🔇' : '🔊'}</Btn>
-                                        <span style={css('display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:6px;background:#ff3b5c;color:#fff;font-size:11px;font-weight:800;letter-spacing:.5px')}>
-                                            <span style={css('width:6px;height:6px;border-radius:50%;background:#fff;animation:pulse 1.4s infinite')} />AO VIVO
-                                        </span>
-                                        <span style={css("font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#dcdce2")}>{elapsedLabel}</span>
+                                    <div style={css('position:absolute;left:0;right:0;bottom:0;padding:30px 16px 12px;background:linear-gradient(0deg,rgba(8,8,12,.85),transparent);display:flex;align-items:center;gap:14px;z-index:2')}>
+                                        <Btn s="width:34px;height:34px;border-radius:8px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:14px;display:flex;align-items:center;justify-content:center" onClick={(e) => { e.stopPropagation(); const v = videoRef.current; if (!v) return; if (v.paused) { v.play().catch(() => {}); setPaused(false); } else { v.pause(); setPaused(true); } }}>{paused ? '▶' : '❚❚'}</Btn>
+                                        <Btn s="width:34px;height:34px;border-radius:8px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:15px;display:flex;align-items:center;justify-content:center" onClick={(e) => { e.stopPropagation(); setMuted((m) => !m); }}>{muted || volume === 0 ? '🔇' : '🔊'}</Btn>
+                                        <input type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onClick={(e) => e.stopPropagation()} onChange={(e) => { const val = +e.target.value; setVolume(val); setMuted(val === 0); }} style={css('width:74px;accent-color:#8b5cf6;cursor:pointer')} />
+                                        <Btn s={`display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:6px;border:none;cursor:pointer;background:${paused ? '#3a3a44' : '#ff3b5c'};color:#fff;font-size:11px;font-weight:800;letter-spacing:.5px`} onClick={(e) => { e.stopPropagation(); seekToLive(); setPaused(false); }}><span style={css(`width:6px;height:6px;border-radius:50%;background:#fff;${paused ? '' : 'animation:pulse 1.4s infinite'}`)} />{paused ? 'VOLTAR AO VIVO' : 'AO VIVO'}</Btn>
+                                        <span style={css("font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#dcdce2")}>{liveElapsedLabel}</span>
                                         <div style={css('flex:1')} />
-                                        <Btn s="height:30px;padding:0 11px;border-radius:7px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:12px;font-weight:700;font-family:'JetBrains Mono',monospace" onClick={(e) => e.stopPropagation()}>1080p ▾</Btn>
-                                        <Btn s="width:34px;height:34px;border-radius:8px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:14px" onClick={(e) => e.stopPropagation()}>⛶</Btn>
+                                        <div style={css('position:relative')}>
+                                            <Btn s="height:30px;padding:0 11px;border-radius:7px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:12px;font-weight:700;font-family:'JetBrains Mono',monospace" onClick={(e) => { e.stopPropagation(); setResMenu((m) => !m); }}>{resLabel} ▾</Btn>
+                                            {resMenu && (
+                                                <div style={css('position:absolute;bottom:38px;right:0;background:#15151c;border:1px solid #2a2a34;border-radius:9px;padding:5px;min-width:104px;display:flex;flex-direction:column;gap:2px')} onClick={(e) => e.stopPropagation()}>
+                                                    <Btn s={`height:30px;padding:0 10px;border-radius:6px;border:none;cursor:pointer;text-align:left;font-size:12px;font-weight:600;background:${currentLevel === -1 ? '#8b5cf6' : 'transparent'};color:#fff;font-family:Archivo,sans-serif`} onClick={() => { setLevel(-1); setResMenu(false); }}>Auto</Btn>
+                                                    {[...levels].sort((a, b) => b.height - a.height).map((l) => (
+                                                        <Btn key={l.index} s={`height:30px;padding:0 10px;border-radius:6px;border:none;cursor:pointer;text-align:left;font-size:12px;font-weight:600;background:${currentLevel === l.index ? '#8b5cf6' : 'transparent'};color:#fff;font-family:'JetBrains Mono',monospace`} onClick={() => { setLevel(l.index); setResMenu(false); }}>{l.height}p</Btn>
+                                                    ))}
+                                                    {levels.length === 0 && <span style={css('color:#7a7a86;font-size:11px;padding:6px 10px')}>carregando...</span>}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <Btn s="width:34px;height:34px;border-radius:8px;border:none;cursor:pointer;background:rgba(255,255,255,.12);color:#fff;font-size:14px" onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}>⛶</Btn>
                                     </div>
                                 )}
                             </div>
 
                             <div style={css('padding:20px 26px;display:flex;align-items:flex-start;gap:16px;border-bottom:1px solid #17171e')}>
-                                <div style={css('width:54px;height:54px;flex-shrink:0;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px')}>B</div>
+                                <div style={css('width:54px;height:54px;flex-shrink:0;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#6d28d9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px')}>{liveChannel[0]?.toUpperCase()}</div>
                                 <div style={css('flex:1;min-width:0')}>
-                                    <div style={css("font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:21px;letter-spacing:-.4px;line-height:1.25")}>RANKED ATÉ CHALLENGER — reação ao patch 14.12</div>
+                                    <div style={css("font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:21px;letter-spacing:-.4px;line-height:1.25")}>{liveTitle}</div>
                                     <div style={css('display:flex;align-items:center;gap:10px;margin-top:6px')}>
-                                        <span style={css('font-weight:700;font-size:15px')}>brunoaiubshow</span>
-                                        <span style={css('color:#8b5cf6;font-size:14px;font-weight:600')}>League of Legends</span>
+                                        <span style={css('font-weight:700;font-size:15px')}>{liveChannel}</span>
+                                        <span style={css('color:#8b5cf6;font-size:14px;font-weight:600')}>{liveCategory}</span>
                                     </div>
                                 </div>
                                 <div style={css('display:flex;gap:9px;flex-shrink:0')}>
@@ -873,6 +970,28 @@ export default function Show() {
                                 </div>
                             </div>
                         ) : (
+                            <>
+                            {/* Informações da live: título, categoria (ex.: Episódio #4), thumbnail */}
+                            <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:22px;margin-top:22px')}>
+                                <div style={css("display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;font-family:'Space Grotesk',sans-serif;margin-bottom:16px")}>🎬 Informações da live</div>
+                                <div style={css('display:grid;grid-template-columns:1.4fr 1fr;gap:18px;align-items:start')}>
+                                    <div>
+                                        <Field label="TÍTULO"><input value={editForm.title} onChange={(e) => setEditForm((f) => ({ ...f, title: e.target.value }))} placeholder="Ex: Conversa sobre IA e o futuro do trabalho" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none')} /></Field>
+                                        <Field label="CATEGORIA / SUBTÍTULO (ex.: Episódio #4)"><input value={editForm.category} onChange={(e) => setEditForm((f) => ({ ...f, category: e.target.value }))} placeholder="Episódio #4" style={css('width:100%;height:46px;padding:0 14px;border-radius:10px;border:1px solid #2a2a34;background:#15151c;color:#fff;font-size:15px;font-family:Archivo,sans-serif;outline:none')} /></Field>
+                                        <Btn s="height:42px;padding:0 20px;border-radius:10px;border:none;cursor:pointer;background:#8b5cf6;color:#fff;font-weight:700;font-size:14px;font-family:Archivo,sans-serif" onClick={saveLiveInfo}>Salvar informações</Btn>
+                                    </div>
+                                    <div>
+                                        <label style={css('display:block;color:#7a7a86;font-size:12px;font-weight:600;margin-bottom:6px')}>THUMBNAIL (capa)</label>
+                                        <div style={css('position:relative;aspect-ratio:16/9;border-radius:12px;overflow:hidden;border:1px solid #2a2a34;background:#15151c;margin-bottom:10px')}>
+                                            {myLive.thumbnail_url ? <img src={myLive.thumbnail_url} alt="thumb" style={css('width:100%;height:100%;object-fit:cover')} /> : <div style={css('width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#5a5a66;font-size:12px')}>sem capa</div>}
+                                        </div>
+                                        <label style={css('display:block;height:40px;line-height:40px;text-align:center;border-radius:10px;border:1px dashed #3a3a44;background:#15151c;color:#c5c5cf;font-size:13px;font-weight:600;cursor:pointer')}>
+                                            ⬆ Enviar imagem (JPG/PNG)
+                                            <input type="file" accept="image/*" style={css('display:none')} onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadThumb(f); }} />
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
                             <div style={css('display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:22px;align-items:start')}>
                                 <div style={css('border-radius:16px;background:#121218;border:1px solid #1f1f27;padding:22px')}>
                                     <div style={css('display:flex;align-items:center;justify-content:space-between;margin-bottom:6px')}>
@@ -907,6 +1026,7 @@ export default function Show() {
                                     </div>
                                 </div>
                             </div>
+                            </>
                         )}
                     </div>
                 )}
@@ -1169,6 +1289,43 @@ function Stat({ label, value, sub, subColor, valueColor, mono }: { label: string
             <div style={css('color:#7a7a86;font-size:12.5px;font-weight:600;margin-bottom:8px')}>{label}</div>
             <div style={css(`font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:30px${valueColor ? ';color:' + valueColor : ''}`)}>{value}</div>
             {sub && <div style={css(`font-size:12.5px;margin-top:3px;color:${subColor ?? '#9a9aa6'}${mono ? ";font-family:'JetBrains Mono',monospace" : ''}`)}>{sub}</div>}
+        </div>
+    );
+}
+
+// Preview ao vivo de baixa resolução, ativado no hover (estilo Twitch).
+function HoverPreview({ tokenUrl, poster }: { tokenUrl: string | null; poster: string | null }) {
+    const ref = useRef<HTMLVideoElement>(null);
+    const [hovering, setHovering] = useState(false);
+
+    useEffect(() => {
+        if (!hovering || !tokenUrl || !ref.current || !Hls.isSupported()) return;
+        let hls: Hls | null = null;
+        let cancelled = false;
+        fetch(tokenUrl, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error())))
+            .then((s) => {
+                if (cancelled || !ref.current) return;
+                hls = new Hls({ capLevelToPlayerSize: true, xhrSetup: (xhr) => xhr.setRequestHeader('Authorization', 'Bearer ' + s.token) });
+                hls.loadSource(s.playback_url);
+                hls.attachMedia(ref.current);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    // menor rendição possível (índice de menor altura)
+                    const lowest = hls!.levels.reduce((min, l, i, arr) => (l.height < arr[min].height ? i : min), 0);
+                    hls!.currentLevel = lowest;
+                    ref.current?.play().catch(() => {});
+                });
+            })
+            .catch(() => {});
+        return () => {
+            cancelled = true;
+            hls?.destroy();
+        };
+    }, [hovering, tokenUrl]);
+
+    return (
+        <div onMouseEnter={() => setHovering(true)} onMouseLeave={() => setHovering(false)} style={css('position:absolute;inset:0;z-index:1')}>
+            <video ref={ref} muted playsInline style={css(`position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;transition:opacity .25s;${hovering ? 'opacity:1' : 'opacity:0;pointer-events:none'}`)} poster={poster ?? undefined} />
         </div>
     );
 }

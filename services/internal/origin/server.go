@@ -58,6 +58,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Thumbnail/poster PÚBLICO (preview.jpg): baixa resolução, sem token —
+	// usado na home/cards mesmo para quem não está logado.
+	if parts[1] == "preview.jpg" {
+		clean := filepath.Clean(filepath.Join(s.mediaRoot, parts[0], "preview.jpg"))
+		if !strings.HasPrefix(clean, filepath.Clean(s.mediaRoot)) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		f, err := os.Open(clean)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer f.Close()
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "no-cache") // atualiza ~1x/s
+		http.ServeContent(w, r, clean, fileModTime(f), f)
+		return
+	}
+
 	// Token via header (player) ou query (?token=).
 	token := bearer(r)
 	claims, err := s.verifier.Parse(token)

@@ -17,6 +17,9 @@ type Pipeline struct {
 	// SegmentSeconds: duração do segmento ao vivo. Menor = menor latência
 	// (à custa de mais arquivos/overhead). Default 2.
 	SegmentSeconds int
+	// ListSize: nº de segmentos mantidos na playlist ao vivo = janela de DVR.
+	// Maior = mais buffer p/ pausar/voltar (estilo YouTube). Default 30.
+	ListSize int
 }
 
 func (p *Pipeline) segDur() int {
@@ -24,6 +27,13 @@ func (p *Pipeline) segDur() int {
 		return p.SegmentSeconds
 	}
 	return 2
+}
+
+func (p *Pipeline) listSize() int {
+	if p.ListSize > 0 {
+		return p.ListSize
+	}
+	return 30
 }
 
 // Variantes ABR: rótulo, escala, bitrate alvo (kbps).
@@ -71,11 +81,13 @@ func (p *Pipeline) run(ctx context.Context, liveID int64, inputArgs []string, st
 	args := append([]string{"-hide_banner", "-loglevel", "warning"}, inputArgs...)
 	args = append(args,
 		"-filter_complex",
-		"[0:v]split=4[v1][v2][v3][v4];" +
+		"[0:v]split=5[v1][v2][v3][v4][v5];" +
 			"[v1]scale=w=1920:h=1080[v1out];" +
 			"[v2]scale=w=1280:h=720[v2out];" +
 			"[v3]scale=w=854:h=480[v3out];" +
-			"[v4]scale=w=1280:h=720[vodout]",
+			"[v4]scale=w=1280:h=720[vodout];" +
+			// branch de preview: frame pequeno (640px) ~1/s p/ thumbnail/poster
+			"[v5]scale=w=640:h=-2,fps=1[previmg]",
 	)
 	for i, r := range renditions {
 		args = append(args,
@@ -94,7 +106,7 @@ func (p *Pipeline) run(ctx context.Context, liveID int64, inputArgs []string, st
 	args = append(args, "-map", "a:0", "-map", "a:0", "-map", "a:0",
 		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
 		"-g", gop, "-keyint_min", gop, "-sc_threshold", "0",
-		"-f", "hls", "-hls_time", segT, "-hls_list_size", "6",
+		"-f", "hls", "-hls_time", segT, "-hls_list_size", fmt.Sprintf("%d", p.listSize()),
 		"-hls_flags", "independent_segments+delete_segments+program_date_time",
 		"-hls_segment_type", "fmp4",
 		"-master_pl_name", "master.m3u8",
@@ -116,6 +128,14 @@ func (p *Pipeline) run(ctx context.Context, liveID int64, inputArgs []string, st
 		"-master_pl_name", "master.m3u8",
 		"-hls_segment_filename", filepath.Join(vodDir, "seg_%d.m4s"),
 		filepath.Join(vodDir, "index.m3u8"),
+	)
+
+	// Saída de PREVIEW: um único JPEG (preview.jpg) atualizado ~1x/s — usado
+	// como poster/thumbnail público da live (sem áudio).
+	args = append(args,
+		"-map", "[previmg]", "-an",
+		"-f", "image2", "-update", "1", "-q:v", "6", "-y",
+		filepath.Join(outDir, "preview.jpg"),
 	)
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)

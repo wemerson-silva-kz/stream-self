@@ -33,6 +33,7 @@ func main() {
 		MediaRoot:      mediaRoot,
 		Encoder:        encoder,
 		SegmentSeconds: config.EnvInt("HLS_TIME", 2),
+		ListSize:       config.EnvInt("HLS_LIST_SIZE", 30),
 	}
 
 	switch mode {

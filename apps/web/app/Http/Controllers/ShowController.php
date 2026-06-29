@@ -11,19 +11,28 @@ class ShowController extends Controller
 {
     public function index(Request $request): Response
     {
-        $live = Live::query()
-            ->where('is_featured', true)
-            ->orWhere('status', 'live')
-            ->orderByDesc('is_featured')
+        // Prioriza a live que está ao vivo agora; senão a última (mais recente).
+        $live = Live::query()->with('owner')
+            ->where('status', 'live')
+            ->latest('started_at')
             ->first()
-            ?? Live::first();
+            ?? Live::query()->with('owner')->latest('id')->first();
+
+        $isLive = $live && $live->status === 'live';
 
         return Inertia::render('show', [
             'live' => $live ? [
                 'id' => $live->id,
                 'slug' => $live->slug,
                 'title' => $live->title,
+                'category' => $live->category, // subtítulo livre (ex.: "Episódio #4")
                 'status' => $live->status,
+                'is_live' => $isLive,
+                'started_at' => $live->started_at?->toIso8601String(),
+                'thumbnail_url' => $live->thumbnailUrl(),
+                // frame ao vivo (gerado pelo ingest) — só existe enquanto transmite.
+                'preview_url' => $isLive ? rtrim((string) config('streaming.origin_url'), '/')."/live/{$live->id}/preview.jpg" : null,
+                'channel' => $live->owner?->name ?? 'brunoaiubshow',
             ] : null,
             // Endpoints que o front usa para buscar token e ligar nos serviços Go.
             'endpoints' => [
@@ -86,11 +95,13 @@ class ShowController extends Controller
         return [
             'id' => $live->id,
             'title' => $live->title,
+            'category' => $live->category,
             'slug' => $live->slug,
             'status' => $live->status,
             'visibility' => $live->visibility,
             'freemium_seconds' => $live->freemium_seconds,
             'is_featured' => $live->is_featured,
+            'thumbnail_url' => $live->thumbnailUrl(),
             'stream_key' => $live->streamKey?->key,
             'rtmp_url' => config('streaming.rtmp_url'),
             'srt_url' => config('streaming.srt_url'),

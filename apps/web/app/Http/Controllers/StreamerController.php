@@ -50,6 +50,7 @@ class StreamerController extends Controller
 
         $data = $request->validate([
             'title' => 'sometimes|string|max:120',
+            'category' => 'nullable|string|max:80',
             'description' => 'nullable|string|max:2000',
             'status' => 'sometimes|in:offline,live,ended',
             'visibility' => 'sometimes|in:public,subscribers',
@@ -86,6 +87,24 @@ class StreamerController extends Controller
         $live->streamKey()->updateOrCreate([], ['key' => StreamKey::generate(), 'revoked_at' => null]);
 
         return back()->with('status', 'Chave rotacionada — a anterior foi revogada.');
+    }
+
+    /** POST /streamer/lives/{live}/thumbnail (multipart, campo "thumbnail") */
+    public function uploadThumbnail(Request $request, Live $live): RedirectResponse
+    {
+        $this->authorize('update', $live);
+        $request->validate([
+            'thumbnail' => 'required|image|mimes:jpg,jpeg,png,webp|max:4096',
+        ]);
+
+        // remove a anterior, salva a nova em storage/app/public/thumbnails
+        if ($live->thumbnail_path) {
+            \Illuminate\Support\Facades\Storage::disk('public')->delete($live->thumbnail_path);
+        }
+        $path = $request->file('thumbnail')->store('thumbnails', 'public');
+        $live->update(['thumbnail_path' => $path]);
+
+        return back()->with('status', 'Thumbnail atualizada.');
     }
 
     private function createVodFrom(Live $live): void
