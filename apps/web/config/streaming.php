@@ -10,6 +10,11 @@ return [
 
     'jwt_alg' => env('STREAM_JWT_ALG', 'HS256'),
 
+    // RS256: Laravel assina com a privada; os serviços Go validam só com a
+    // pública (não podem emitir tokens). Caminhos dos PEM.
+    'jwt_private_key' => env('STREAM_JWT_PRIVATE_KEY', storage_path('keys/jwt_private.pem')),
+    'jwt_public_key' => env('STREAM_JWT_PUBLIC_KEY', storage_path('keys/jwt_public.pem')),
+
     // Tempo de vida do JWT de viewer (segundos).
     'viewer_token_ttl' => (int) env('STREAM_VIEWER_TOKEN_TTL', 3600),
 

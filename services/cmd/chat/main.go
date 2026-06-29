@@ -19,7 +19,6 @@ import (
 func main() {
 	addr := config.Env("CHAT_ADDR", ":8082")
 	redisAddr := config.Env("REDIS_ADDR", "localhost:6379")
-	jwtSecret := config.Env("STREAM_JWT_SECRET", "change-me")
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -29,7 +28,11 @@ func main() {
 		log.Fatalf("chat: redis indisponível: %v", err)
 	}
 
-	srv := chat.NewServer(rdb, auth.NewVerifier(jwtSecret))
+	verifier, err := auth.VerifierFromEnv()
+	if err != nil {
+		log.Fatalf("chat: jwt verifier: %v", err)
+	}
+	srv := chat.NewServer(rdb, verifier)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", srv.HandleWS)

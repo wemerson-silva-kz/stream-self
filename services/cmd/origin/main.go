@@ -19,14 +19,17 @@ import (
 func main() {
 	addr := config.Env("ORIGIN_ADDR", ":8081")
 	redisAddr := config.Env("REDIS_ADDR", "localhost:6379")
-	jwtSecret := config.Env("STREAM_JWT_SECRET", "change-me")
 	mediaRoot := config.Env("MEDIA_ROOT", "/srv/media")
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := origin.NewServer(mediaRoot, rdb, auth.NewVerifier(jwtSecret))
+	verifier, err := auth.VerifierFromEnv()
+	if err != nil {
+		log.Fatalf("origin: jwt verifier: %v", err)
+	}
+	srv := origin.NewServer(mediaRoot, rdb, verifier)
 	httpSrv := &http.Server{Addr: addr, Handler: srv}
 
 	go func() {

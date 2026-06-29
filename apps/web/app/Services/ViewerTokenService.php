@@ -40,11 +40,12 @@ class ViewerTokenService
             'exp' => $exp,
         ];
 
-        $token = JWT::encode(
-            $payload,
-            (string) config('streaming.jwt_secret'),
-            (string) config('streaming.jwt_alg'),
-        );
+        $alg = (string) config('streaming.jwt_alg');
+        $key = str_starts_with($alg, 'RS')
+            ? (string) file_get_contents((string) config('streaming.jwt_private_key'))
+            : (string) config('streaming.jwt_secret');
+
+        $token = JWT::encode($payload, $key, $alg);
 
         return [
             'token' => $token,
