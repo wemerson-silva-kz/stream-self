@@ -4,6 +4,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,16 @@ import (
 type Pipeline struct {
 	MediaRoot string
 	Encoder   string // h264_nvenc | libx264
+	// SegmentSeconds: duração do segmento ao vivo. Menor = menor latência
+	// (à custa de mais arquivos/overhead). Default 2.
+	SegmentSeconds int
+}
+
+func (p *Pipeline) segDur() int {
+	if p.SegmentSeconds > 0 {
+		return p.SegmentSeconds
+	}
+	return 2
 }
 
 // Variantes ABR: rótulo, escala, bitrate alvo (kbps).
@@ -27,6 +38,16 @@ var renditions = []struct {
 // Start dispara o FFmpeg para uma live, lendo do input (ex.: srt://... ou pipe)
 // e escrevendo LL-HLS em MediaRoot/{liveID}/. Bloqueia até o processo terminar.
 func (p *Pipeline) Start(ctx context.Context, liveID int64, input string) error {
+	return p.run(ctx, liveID, []string{"-i", input}, nil)
+}
+
+// StartFLV roda o pipeline lendo um stream FLV de um io.Reader (usado pela ponte
+// do servidor RTMP: go-rtmp -> FLV -> stdin do FFmpeg).
+func (p *Pipeline) StartFLV(ctx context.Context, liveID int64, r io.Reader) error {
+	return p.run(ctx, liveID, []string{"-f", "flv", "-i", "pipe:0"}, r)
+}
+
+func (p *Pipeline) run(ctx context.Context, liveID int64, inputArgs []string, stdin io.Reader) error {
 	outDir := filepath.Join(p.MediaRoot, fmt.Sprintf("%d", liveID))
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
@@ -36,19 +57,26 @@ func (p *Pipeline) Start(ctx context.Context, liveID int64, input string) error 
 			return err
 		}
 	}
+	// Diretório do VOD (gravação): playlist 'event', segmentos preservados.
+	vodDir := filepath.Join(outDir, "vod")
+	if err := os.MkdirAll(vodDir, 0o755); err != nil {
+		return err
+	}
 
 	enc := p.Encoder
 	if enc == "" {
 		enc = "libx264"
 	}
 
-	args := []string{"-hide_banner", "-loglevel", "warning", "-i", input,
+	args := append([]string{"-hide_banner", "-loglevel", "warning"}, inputArgs...)
+	args = append(args,
 		"-filter_complex",
-		"[0:v]split=3[v1][v2][v3];" +
+		"[0:v]split=4[v1][v2][v3][v4];" +
 			"[v1]scale=w=1920:h=1080[v1out];" +
 			"[v2]scale=w=1280:h=720[v2out];" +
-			"[v3]scale=w=854:h=480[v3out]",
-	}
+			"[v3]scale=w=854:h=480[v3out];" +
+			"[v4]scale=w=1280:h=720[vodout]",
+	)
 	for i, r := range renditions {
 		args = append(args,
 			"-map", fmt.Sprintf("[v%dout]", i+1),
@@ -58,11 +86,15 @@ func (p *Pipeline) Start(ctx context.Context, liveID int64, input string) error 
 			fmt.Sprintf("-bufsize:v:%d", i), fmt.Sprintf("%dk", r.bufsize),
 		)
 	}
+	// GOP alinhado ao segmento (fechado) para ABR/seek limpos e baixa latência.
+	gop := fmt.Sprintf("%d", p.segDur()*24)
+	segT := fmt.Sprintf("%d", p.segDur())
+
 	// 3 trilhas de áudio (uma por variante).
 	args = append(args, "-map", "a:0", "-map", "a:0", "-map", "a:0",
 		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
-		"-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
-		"-f", "hls", "-hls_time", "2", "-hls_list_size", "6",
+		"-g", gop, "-keyint_min", gop, "-sc_threshold", "0",
+		"-f", "hls", "-hls_time", segT, "-hls_list_size", "6",
 		"-hls_flags", "independent_segments+delete_segments+program_date_time",
 		"-hls_segment_type", "fmp4",
 		"-master_pl_name", "master.m3u8",
@@ -71,7 +103,23 @@ func (p *Pipeline) Start(ctx context.Context, liveID int64, input string) error 
 		filepath.Join(outDir, "%v", "index.m3u8"),
 	)
 
+	// Saída de GRAVAÇÃO (VOD): 720p, playlist 'event' (cresce e nunca deleta
+	// segmentos). Vira o replay/Episódio quando a live encerra.
+	args = append(args,
+		"-map", "[vodout]", "-map", "a:0",
+		"-c:v", enc, "-b:v", "3000k", "-maxrate", "3210k", "-bufsize", "4500k",
+		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
+		"-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
+		"-f", "hls", "-hls_time", "4", "-hls_playlist_type", "event",
+		"-hls_flags", "independent_segments+program_date_time",
+		"-hls_segment_type", "fmp4",
+		"-master_pl_name", "master.m3u8",
+		"-hls_segment_filename", filepath.Join(vodDir, "seg_%d.m4s"),
+		filepath.Join(vodDir, "index.m3u8"),
+	)
+
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd.Stdin = stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

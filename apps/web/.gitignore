@@ -27,3 +27,6 @@ yarn-error.log
 /.nova
 /.vscode
 /.zed
+
+# JWT keys (RS256) — gere no deploy
+/storage/keys/*.pem

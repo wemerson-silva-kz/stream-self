@@ -64,6 +64,9 @@ func NewVerifier(secret string) *Verifier {
 	return &Verifier{alg: "HS256", secret: []byte(secret)}
 }
 
+// Alg devolve o algoritmo configurado (diagnóstico).
+func (v *Verifier) Alg() string { return v.alg }
+
 // NewVerifierFromConfig escolhe o algoritmo. Para RS256, key é o PEM da chave
 // pública; para HS256, é o segredo compartilhado.
 func NewVerifierFromConfig(alg, key string) (*Verifier, error) {

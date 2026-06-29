@@ -32,6 +32,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("chat: jwt verifier: %v", err)
 	}
+	log.Printf("chat: jwt alg = %s", verifier.Alg())
 	srv := chat.NewServer(rdb, verifier)
 
 	mux := http.NewServeMux()
